@@ -6,14 +6,17 @@ Station endpoint and pagination contract:
   .agents/skills/deye-cloud-scenarios/SKILL.md
   https://developer.deyecloud.com/openmcp/docs/deye-open-mcp-tools.html#station_list
 
-Credentials are read only from Windows Credential Manager. Tokens and API
-responses are never persisted or logged. Do not enable HTTP debug logging or
+Credentials come from Windows Credential Manager by default, or explicit
+environment mode for Actions. Tokens are never persisted or logged. A trusted
+in-process read observer may archive successful read JSON in a private store.
+Do not enable HTTP debug logging or
 local-variable capture when integrating this module into another application.
 """
 
 import argparse
 import hashlib
 import json
+import os
 import sys
 import time
 
@@ -55,8 +58,29 @@ class DeyeClientError(RuntimeError):
         self.issues = issues
 
 
+def read_environment_credentials():
+    """Explicit, all-or-nothing Actions source; never falls back to Windows."""
+    names = {"AppId": "DEYE_APP_ID", "AppSecret": "DEYE_APP_SECRET",
+             "Email": "DEYE_EMAIL", "Password": "DEYE_PASSWORD"}
+    credentials = {field: os.environ.get(name, "") for field, name in names.items()}
+    if any(not value or not value.strip() or "\x00" in value or len(value) > 4096
+           for value in credentials.values()):
+        credentials.clear()
+        raise CredentialSetupError("Credenciales de entorno incompletas o inválidas.")
+    return credentials
+
+
 class DeyeClient:
-    def __init__(self) -> None:
+    def __init__(self, *, auth_mode=None, read_observer=None,
+                 min_interval=0.0, max_requests=None) -> None:
+        self._auth_mode = auth_mode or os.environ.get("DEYE_AUTH_MODE", "windows")
+        if self._auth_mode not in {"windows", "environment"}:
+            raise DeyeClientError("Modo de autenticación inválido.")
+        self._read_observer = read_observer
+        self._min_interval = min_interval
+        self._max_requests = max_requests
+        self._request_count = 0
+        self._last_request = None
         self._token: str | None = None
         self._authenticated_until = 0.0
         self._session = requests.Session()
@@ -93,10 +117,16 @@ class DeyeClient:
             raise DeyeClientError("Parámetros de consulta no permitidos.")
         if authenticated and self._token is None:
             raise DeyeClientError("Es necesario autenticar antes de consultar.")
+        if self._max_requests is not None and self._request_count >= self._max_requests:
+            raise DeyeClientError("Presupuesto de peticiones agotado.", code="REQUEST_BUDGET")
+        if self._last_request is not None and self._min_interval:
+            time.sleep(max(0, self._min_interval - (time.monotonic() - self._last_request)))
+        self._request_count += 1
+        self._last_request = time.monotonic()
         headers = {}
         if authenticated:
             headers["Authorization"] = f"bearer {self._token}"
-        deadline = time.monotonic() + REQUEST_DEADLINE_SECONDS
+        deadline = self._last_request + REQUEST_DEADLINE_SECONDS
         try:
             with self._session.post(
                 BASE_URL + path,
@@ -155,6 +185,8 @@ class DeyeClient:
                 "2101012": "API_INTERVAL_REJECTED",
             }.get(str(result.get("code")), "DEYE_UNAVAILABLE")
             raise DeyeClientError("Deye devolvió un error de aplicación.", code=safe_code)
+        if authenticated and self._read_observer is not None:
+            self._read_observer(path, result)
         return result
 
     def query_read(self, name: str, arguments: dict) -> dict:
@@ -219,7 +251,8 @@ class DeyeClient:
         """Read existing entries and obtain a personal token in memory only."""
         self._token = None
         self._authenticated_until = 0.0
-        credentials = read_and_validate_credentials()
+        credentials = (read_environment_credentials() if self._auth_mode == "environment"
+                       else read_and_validate_credentials())
         body = {}
         params = {}
         result = {}

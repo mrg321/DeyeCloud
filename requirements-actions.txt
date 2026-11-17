@@ -1,0 +1,3 @@
+# Standalone collector: no MCP SDK, pywin32 or interactive tooling.
+requests==2.34.2
+tzdata==2026.6

@@ -3,6 +3,8 @@
 !/.gitignore
 !/README.md
 !/requirements.txt
+!/requirements-actions.txt
+!/.github/
 !/scripts/
 !/tests/
 !/docs/
@@ -15,8 +17,15 @@
 /docs/*
 !/docs/deye_local.md
 !/docs/PUBLICATION.md
+!/docs/automation.md
 /config/*
 !/config/deye_local.example.toml
+!/config/data.example.json
+
+/.github/*
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/deye-daily.yml
 
 **/__pycache__/
 *.py[cod]

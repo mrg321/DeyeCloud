@@ -264,6 +264,7 @@ class ServiceTests(OfflineTestCase):
 
 
 class ProtocolTests(OfflineTestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows Credential Manager subprocess fixture")
     def test_real_stdio_transport_with_io_blocked_in_child(self):
         root = Path(__file__).resolve().parents[1]
         # Child uses the real entry point with cloud/credential I/O disabled.
@@ -326,17 +327,18 @@ class ProtocolTests(OfflineTestCase):
 
     def test_public_config_template_paths_and_isolation(self):
         import tomllib
+        from pathlib import PureWindowsPath
         root = Path(__file__).resolve().parents[1]
         config = tomllib.loads((root / "config/deye_local.example.toml").read_text(encoding="utf-8"))
         self.assertEqual(set(config["mcp_servers"]), {"deye_local"})
         server = config["mcp_servers"]["deye_local"]
-        template_root = Path(server["cwd"])
+        template_root = PureWindowsPath(server["cwd"])
         self.assertEqual(server["cwd"], r"C:\PATH\TO\DeyeCloud")
-        self.assertEqual(Path(server["command"]), template_root / ".venv/Scripts/python.exe")
+        self.assertEqual(PureWindowsPath(server["command"]), template_root / ".venv/Scripts/python.exe")
         self.assertEqual(server["args"][0], "-u")
-        relative_script = Path(server["args"][-1]).relative_to(template_root)
-        self.assertEqual(relative_script, Path("scripts/deye_mcp_server.py"))
-        self.assertTrue((root / relative_script).is_file())
+        relative_script = PureWindowsPath(server["args"][-1]).relative_to(template_root)
+        self.assertEqual(relative_script, PureWindowsPath("scripts/deye_mcp_server.py"))
+        self.assertTrue(root.joinpath(*relative_script.parts).is_file())
         self.assertEqual(set(server["enabled_tools"]), {tool.name for tool in server_module.TOOLS})
 
 

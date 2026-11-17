@@ -1,6 +1,7 @@
 # Archivos revisados para publicación
 
-Esta lista describe la selección para el primer commit. Se revisaron el contenido
+Esta lista describe los archivos publicables del proyecto y de la automatización.
+Se revisaron el contenido
 de cada candidato, los datos identificativos presentes en las evidencias locales,
 los ejemplos de autenticación, las rutas de máquina y el índice de Git.
 Los valores de las pruebas son ficticios y no proceden de las credenciales de Windows.
@@ -28,6 +29,15 @@ Los valores de las pruebas son ficticios y no proceden de las credenciales de Wi
 | `tests/test_deye_local.py` | Credenciales ficticias, respuestas simuladas y E/S real bloqueada; usa la plantilla pública |
 | `tests/test_deye_audit.py` | Respuestas y dispositivos simulados, sin series reales |
 | `tests/test_deye_history.py` | Casos de calendario, calidad y límites con datos simulados |
+| `.github/workflows/deye-daily.yml` | Workflow sin datos reales, con Secrets, permisos mínimos y habilitación explícita |
+| `requirements-actions.txt` | Dependencias fijadas del recolector independiente de MCP |
+| `config/data.example.json` | Plantilla incompleta; la configuración real debe residir solo en el privado |
+| `docs/automation.md` | Arquitectura, límites y puesta en marcha; sin valores reales de Secrets o configuración |
+| `scripts/collect_deye_daily.py` | Recopilación de lectura, validación y construcción de transacción privada |
+| `scripts/deye_private_store.py` | Destino privado obligatorio y actualización atómica; sin credenciales embebidas |
+| `scripts/check_publication.py` | Revisión de archivos, índice e historial; nunca imprime valores detectados |
+| `tests/test_daily_collection.py` | Respuestas simuladas y persistencia en memoria; sin MCP ni red real |
+| `tests/test_publication.py` | Historial y secretos sintéticos en repositorios temporales de prueba |
 
 ## Archivos del proyecto excluidos
 
@@ -59,6 +69,9 @@ instaladas. La plantilla publicada requiere sustituir sus rutas antes de registr
 un servidor real. Los generadores de auditoría sí necesitan consultar datos reales
 o disponer de resultados locales cuando se ejecutan deliberadamente.
 
-La selección se añade al índice por nombres explícitos. Antes del commit se
-comprueban el contenido staged y su coincidencia exacta con esta lista. No se
-crea un commit ni se publica en un remoto como parte de esta preparación.
+La selección debe añadirse al índice por nombres explícitos y comprobarse antes
+del commit. El historial inicial contiene una identidad Git cuyo correo no es
+`noreply`; requiere revisión previa a publicación, sin exponerlo aquí. Ejecutar
+`python scripts/check_publication.py`: no basta con ignorar archivos que ya se
+versionaron. No se reescribe el historial, se hace commit ni se publica como parte
+de esta preparación de la automatización.

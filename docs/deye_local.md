@@ -1,5 +1,10 @@
 # DeyeCloud: MCP local de lectura y auditoría técnica (0.4.1, fase 4B)
 
+Para ejecución diaria sin MCP y separación entre código público/datos privados,
+véase [automatización con GitHub Actions](automation.md). El modo local conserva
+Windows Credential Manager; el cliente también admite un modo explícito de
+variables de entorno, sin fallback cuando están incompletas.
+
 ## Archivos
 
 - `scripts/deye_mcp_server.py`: servidor MCP oficial para Python, transporte stdio.

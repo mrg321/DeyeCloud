@@ -33,6 +33,12 @@ Los scripts de auditoría consultan datos reales cuando se ejecutan expresamente
 - [Herramientas, parámetros, límites y auditorías](docs/deye_local.md).
 - [Ejemplo de registro MCP](config/deye_local.example.toml).
 - [Lista de archivos revisados para publicación](docs/PUBLICATION.md).
+- [Automatización diaria con datos en repositorio privado](docs/automation.md).
+
+La automatización usa el cliente directamente desde Linux y GitHub Actions
+Secrets, manteniendo la autenticación local de Windows. Está deshabilitada hasta
+autorización explícita. El código público y los datos privados residen en
+repositorios distintos; no se suben informes ni consumos como artefactos de Actions.
 
 Los resultados de auditoría pueden contener nombres de instalaciones, IDs,
 versiones, consumos y patrones de uso aunque oculten los números de serie.

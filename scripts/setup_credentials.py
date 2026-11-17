@@ -6,9 +6,29 @@ Password stores the original password, not its SHA-256 hash.
 
 from getpass import getpass
 import hmac
+import sys
 
-import pywintypes
-import win32cred
+if sys.platform == "win32":
+    import pywintypes
+    import win32cred
+else:
+    # Importable on Linux for the environment-authenticated collector and tests.
+    # There is no plaintext-file fallback for Windows Credential Manager.
+    class _UnavailableCredentials:
+        CRED_TYPE_GENERIC = 1
+        CRED_PERSIST_LOCAL_MACHINE = 2
+
+        @staticmethod
+        def CredRead(*args, **kwargs):
+            raise OSError("WINDOWS_CREDENTIALS_UNAVAILABLE")
+
+        CredWrite = CredRead
+
+    class _WindowsErrors:
+        error = OSError
+
+    win32cred = _UnavailableCredentials()
+    pywintypes = _WindowsErrors()
 
 
 FIELDS = ("AppId", "AppSecret", "Email", "Password")
