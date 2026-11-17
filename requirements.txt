@@ -1,0 +1,6 @@
+pywin32; sys_platform == "win32"
+requests
+# IANA time zone rules, required by zoneinfo on Windows (DST-aware audits).
+tzdata>=2026.2
+# Official Python MCP SDK, supported 1.x API used by the local server.
+mcp>=1.28,<2

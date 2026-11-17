@@ -1,0 +1,10 @@
+# TEMPLATE ONLY. Replace the two placeholder paths before registering locally.
+# Keep your local copy outside Git. Merge only this server section into your
+# MCP client's configuration; preserve the other server sections.
+[mcp_servers.deye_local]
+command = 'C:\PATH\TO\DeyeCloud\.venv\Scripts\python.exe'
+args = ['-u', 'C:\PATH\TO\DeyeCloud\scripts\deye_mcp_server.py']
+cwd = 'C:\PATH\TO\DeyeCloud'
+startup_timeout_sec = 15
+tool_timeout_sec = 120
+enabled_tools = ['deye_connection_status', 'deye_list_stations', 'deye_list_station_devices', 'deye_station_latest', 'deye_device_latest', 'deye_device_measure_points', 'deye_read_battery_settings', 'deye_read_system_settings', 'deye_read_tou', 'deye_station_alerts', 'deye_device_alerts', 'deye_station_metadata', 'deye_station_daily_history', 'deye_station_power_history', 'deye_device_daily_history', 'deye_device_intraday_history']
