@@ -159,6 +159,8 @@ DeyeCloud-data/                   # privado, rama main
   intraday/YYYY-MM-DD.json        # muestras por timestamp/medida, unidades explícitas
   consumption/YYYY-MM-DD.json     # consumo, compra y exportación reportados
   evening/YYYY-MM-DD.json         # instantánea parcial para planificar el día siguiente
+  reports/evening/YYYY-MM-DD.xlsx # libro de la instantánea parcial
+  reports/closed/YYYY-MM-DD.xlsx  # libro del lote, por última fecha consultada
   parameters/latest.json         # parámetros leídos; puntos no admitidos diferenciados
   state/collection.json           # última ventana consultada y hashes de originales
 ```

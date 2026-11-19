@@ -27,6 +27,10 @@ def valid_data_path(path):
         r"originals/[a-f0-9]{64}\.json|(?:daily|intraday|consumption|evening)/\d{4}-\d{2}-\d{2}\.json)", path))
 
 
+def valid_workbook_path(path):
+    return bool(re.fullmatch(r"reports/(?:closed|evening)/\d{4}-\d{2}-\d{2}\.xlsx", path))
+
+
 class GitHubPrivateStore:
     """Publish one whole run using a non-forced Git ref update (fast-forward only)."""
 
@@ -106,9 +110,12 @@ class GitHubPrivateStore:
     def publish(self, changes):
         pending = []
         for path, value in sorted(changes.items()):
-            if not valid_data_path(path) or path == "config/installation.json":
+            if valid_workbook_path(path) and isinstance(value, bytes):
+                content = value
+            elif valid_data_path(path) and path != "config/installation.json":
+                content = canonical(value)
+            else:
                 raise PrivateStoreError("PRIVATE_PATH_INVALID")
-            content = canonical(value)
             if self.entries.get(path, {}).get("sha") == blob_sha(content):
                 continue
             pending.append((path, content))

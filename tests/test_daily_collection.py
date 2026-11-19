@@ -11,6 +11,8 @@ import sys
 import unittest
 from contextlib import ExitStack, redirect_stdout
 from unittest.mock import patch
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 import requests
 
@@ -51,7 +53,7 @@ class MemoryStore:
         if self.fail:
             raise PrivateStoreError(FAKE)
         result = {**self.files, **deepcopy(changes)}
-        if canonical(result) == canonical(self.files):
+        if result == self.files:
             return False
         self.files = result
         self.commits += 1
@@ -138,7 +140,14 @@ class CollectorTests(Offline):
         self.assertTrue(collector.collect(client, store, now=now, mode="evening"))
         path = f"evening/{today}.json"
         self.assertTrue(valid_data_path(path))
-        self.assertEqual(set(store.files), {"config/installation.json", path})
+        workbook_path = f"reports/evening/{today}.xlsx"
+        self.assertEqual(set(store.files), {"config/installation.json", path, workbook_path})
+        with ZipFile(io.BytesIO(store.files[workbook_path])) as workbook:
+            self.assertIsNone(workbook.testzip())
+            for name in workbook.namelist():
+                ElementTree.fromstring(workbook.read(name))
+            self.assertIn(b"Telemetry", workbook.read("xl/workbook.xml"))
+            self.assertIn(b"<v>62.0</v>", workbook.read("xl/worksheets/sheet1.xml"))
         snapshot = store.files[path]
         self.assertTrue(snapshot["partial"])
         self.assertEqual(snapshot["captured_at"], now.isoformat())
@@ -172,7 +181,8 @@ class CollectorTests(Offline):
         self.assertFalse(collector.collect(client, store, now=NOW, originals=originals))
         self.assertEqual(store.files, snapshot)
         self.assertEqual(store.commits, 1)
-        self.assertNotIn(FAKE, json.dumps(store.files))
+        self.assertNotIn(FAKE, json.dumps({path: value for path, value in store.files.items()
+                                           if path.endswith(".json")}))
         self.assertTrue(any(path.startswith("originals/") for path in store.files))
         self.assertEqual(store.files["parameters/latest.json"]["deye_read_tou"]["status"], "UNSUPPORTED_CONFIG_POINT")
         self.assertEqual(len([path for path in store.files if path.startswith("daily/")]), 4)
@@ -290,12 +300,18 @@ class PrivateStoreTests(Offline):
 
     def test_ref_update_is_atomic_nonforced_and_public_destination_is_rejected(self):
         private = {"private": True, "visibility": "private"}
+        workbook = collector.collection_workbook({}, "closed", "2026-10-25")
         responses = self.init_responses() + [response(private), response({"sha": "c" * 40}, 201),
+            response({"sha": "f" * 40}, 201),
             response({"sha": "d" * 40}, 201), response({"sha": "e" * 40}, 201), response(private), response({"ref": "refs/heads/main"})]
         with patch("requests.sessions.Session.request", side_effect=responses) as http:
             store = GitHubPrivateStore("example/DeyeCloud-data", FAKE, public_repository="example/DeyeCloud")
             self.addCleanup(store.close)
-            self.assertTrue(store.publish({"daily/2026-10-25.json": {"value": 1}}))
+            self.assertTrue(store.publish({"daily/2026-10-25.json": {"value": 1},
+                                           "reports/closed/2026-10-25.xlsx": workbook}))
+            blob_calls = [call for call in http.call_args_list if call.args[0] == "POST"
+                          and call.args[1].endswith("/git/blobs")]
+            self.assertEqual(base64.b64decode(blob_calls[1].kwargs["json"]["content"]), workbook)
             self.assertEqual(http.call_args.args[0], "PATCH")
             self.assertEqual(http.call_args.kwargs["json"], {"sha": "e" * 40, "force": False})
             commit_call = next(call for call in http.call_args_list if call.args[0] == "POST" and call.args[1].endswith("/git/commits"))

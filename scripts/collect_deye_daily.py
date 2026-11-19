@@ -12,10 +12,12 @@ if __package__:
     from .deye_client import DeyeClient, DeyeClientError
     from .deye_history_quality import MADRID, day_bounds, numeric, sample_time, analyze_samples
     from .deye_private_store import GitHubPrivateStore, canonical
+    from .deye_workbook import collection_workbook
 else:
     from deye_client import DeyeClient, DeyeClientError
     from deye_history_quality import MADRID, day_bounds, numeric, sample_time, analyze_samples
     from deye_private_store import GitHubPrivateStore, canonical
+    from deye_workbook import collection_workbook
 
 
 class CollectionError(RuntimeError):
@@ -259,6 +261,7 @@ def collect(client, store, *, now=None, end_date=None, originals=None, mode="clo
             "partial": True, "captured_at": cutoff, "latest_sample_at": samples[-1]["timestamp"] if samples else None,
             "latest_soc": latest_soc, "samples": samples, "parameters": parameters,
             "original_hashes": sorted(source_hashes)}
+        changes[f"reports/evening/{day}.xlsx"] = collection_workbook(changes, mode, day)
         return store.publish(changes)
 
     dates = {"start_date": days[0], "end_date": days[-1]}
@@ -294,6 +297,7 @@ def collect(client, store, *, now=None, end_date=None, originals=None, mode="clo
     changes["state/collection.json"] = {"schema_version": 1, "last_target_date": days[-1],
         "queried_dates": days, "original_hashes": sorted(source_hashes),
         "backfill": end_date is not None, "timezone": "Europe/Madrid"}
+    changes[f"reports/closed/{days[-1]}.xlsx"] = collection_workbook(changes, mode, days[-1])
     return store.publish(changes)
 
 
