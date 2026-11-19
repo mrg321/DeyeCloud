@@ -36,8 +36,8 @@ de lectura se procesan en memoria y se guardan únicamente en el repositorio pri
    privado, con `Contents: write`. Alternativamente, PAT de alcance fino explícito.
 4. Lectura de `config/installation.json` desde el repositorio privado y validación
    de instalación, inversor, pertenencia del dispositivo y zona horaria.
-5. En modo `closed`, consulta del **último día completo de Europe/Madrid y sus
-   tres días anteriores**, excluyendo fechas anteriores a `installation_start`.
+5. Consulta del **día en curso y de los tres días cerrados anteriores** en
+   `Europe/Madrid`, a partir de `installation_start`.
 6. Recuperación de resúmenes diarios de instalación/dispositivo y dos grupos de
    curvas por día: SOC/temperaturas y potencias FV/vivienda/red/batería. Solo se
    solicitan claves que el inversor declare disponibles. Se leen también los
@@ -45,12 +45,12 @@ de lectura se procesan en memoria y se guardan únicamente en el repositorio pri
 7. Validación y construcción de todos los cambios en memoria. Publicación mediante
    una única actualización no forzada de la referencia `main` del repositorio privado.
 
-El modo `evening` consulta las curvas intradía de hoy en `Europe/Madrid`, el SOC
-más reciente disponible de hoy y los parámetros de sistema, batería y TOU.
-Guarda una instantánea parcial con hora de captura y de última muestra. Una
-nueva captura del mismo día actualiza esa instantánea. El modo `closed` admite
-`end_date` para recuperar una fecha cerrada y las tres anteriores. Los inputs
-públicos del workflow contienen como máximo el modo y la fecha.
+La captura de hoy incluye las curvas intradía, el SOC más reciente disponible
+de hoy y los parámetros de sistema, batería y TOU. Se guarda como instantánea
+parcial con hora de captura y de última muestra. Una nueva captura del mismo
+día actualiza esa instantánea. El libro en `reports/combined/` incluye la
+instantánea y los datos de los días cerrados. Para recuperar un intervalo
+histórico concreto desde el equipo local, usa `--end-date` con el recolector Python.
 
 ## Programación externa
 
@@ -58,17 +58,14 @@ El workflow usa `workflow_dispatch` para las ejecuciones manuales y las peticion
 del programador externo. Publica el workflow en la rama predeterminada y configura
 `DEYE_AUTOMATION_ENABLED=true` en GitHub para habilitar el job.
 
-Para planificar el día siguiente, configura una petición diaria a las 19:00 en
-`Europe/Madrid` con el modo `evening`. Si también necesitas los totales cerrados,
-configura otra petición a las 03:30 con el modo `closed`.
+Para planificar el día siguiente, programa una petición diaria a la hora en
+que necesites los datos. Las 19:00 en `Europe/Madrid` son un ejemplo.
 
 - Método `POST`
 - URL `https://api.github.com/repos/mrg321/DeyeCloud/actions/workflows/deye-daily.yml/dispatches`
 - Cabeceras `Authorization: Bearer <TOKEN>`, `Accept: application/vnd.github+json`
   y `Content-Type: application/json`
-- Cuerpo para la tarde `{"ref":"main","inputs":{"mode":"evening"}}`.
-- Cuerpo para el cierre `{"ref":"main","inputs":{"mode":"closed"}}`.
-  Para un relleno manual, indica `end_date` en `inputs` con el modo `closed`.
+- Cuerpo `{"ref":"main"}`.
 
 Usa un token fine-grained dedicado al repositorio público `mrg321/DeyeCloud`, con
 el permiso de repositorio **Actions: Read and write**. Guarda ese token como
@@ -161,6 +158,7 @@ DeyeCloud-data/                   # privado, rama main
   evening/YYYY-MM-DD.json         # instantánea parcial para planificar el día siguiente
   reports/evening/YYYY-MM-DD.xlsx # libro de la instantánea parcial
   reports/closed/YYYY-MM-DD.xlsx  # libro del lote, por última fecha consultada
+  reports/combined/YYYY-MM-DD.xlsx # libro del workflow, por fecha de captura
   parameters/latest.json         # parámetros leídos; puntos no admitidos diferenciados
   state/collection.json           # última ventana consultada y hashes de originales
 ```

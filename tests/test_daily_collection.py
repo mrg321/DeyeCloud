@@ -120,6 +120,29 @@ class Offline(unittest.TestCase):
 
 
 class CollectorTests(Offline):
+    def test_combined_collects_madrid_today_and_three_closed_days_in_one_commit(self):
+        now = datetime(2026, 10, 25, 23, 30, tzinfo=timezone.utc)
+        store, client = MemoryStore(), FakeDeye()
+        self.assertTrue(collector.collect(client, store, now=now, mode="combined"))
+        today = "2026-10-26"
+        closed_dates = ["2026-10-23", "2026-10-24", "2026-10-25"]
+        self.assertEqual(store.files["state/collection.json"]["queried_dates"], closed_dates)
+        self.assertTrue(store.files[f"evening/{today}.json"]["partial"])
+        self.assertEqual({path for path in store.files if path.startswith("daily/")},
+                         {f"daily/{day}.json" for day in closed_dates})
+        self.assertEqual(store.commits, 1)
+        settings_calls = [name for name, _ in client.calls if name == "deye_read_tou"]
+        self.assertEqual(len(settings_calls), 1)
+        with ZipFile(io.BytesIO(store.files[f"reports/combined/{today}.xlsx"])) as workbook:
+            self.assertIn(b"Daily energy", workbook.read("xl/workbook.xml"))
+            self.assertIn(today.encode(), workbook.read("xl/worksheets/sheet1.xml"))
+
+        store, client = MemoryStore(), FakeDeye()
+        store.files["config/installation.json"]["installation_start"] = today
+        self.assertTrue(collector.collect(client, store, now=now, mode="combined"))
+        self.assertNotIn("state/collection.json", store.files)
+        self.assertFalse(any(name == "deye_device_daily_history" for name, _ in client.calls))
+
     def test_evening_snapshot_uses_madrid_today_and_keeps_closed_history_separate(self):
         now = datetime(2026, 10, 25, 23, 30, tzinfo=timezone.utc)
         today = "2026-10-26"
@@ -376,16 +399,12 @@ class PrivateStoreTests(Offline):
 class WorkflowTests(unittest.TestCase):
     def test_workflow_has_no_public_writes_artifacts_or_untrusted_trigger(self):
         workflow = json.loads((Path(__file__).resolve().parents[1] / ".github/workflows/deye-daily.yml").read_text())
-        self.assertEqual(set(workflow["on"]), {"workflow_dispatch"})
-        self.assertFalse(workflow["on"]["workflow_dispatch"]["inputs"]["end_date"]["required"])
-        mode = workflow["on"]["workflow_dispatch"]["inputs"]["mode"]
-        self.assertEqual(mode["default"], "closed")
-        self.assertEqual(mode["options"], ["closed", "evening"])
+        self.assertEqual(workflow["on"], {"workflow_dispatch": {}})
         self.assertFalse(workflow["concurrency"]["cancel-in-progress"])
         job = workflow["jobs"]["collect"]
         self.assertEqual(job["permissions"], {"contents": "read"})
         self.assertEqual(job["timeout-minutes"], 15)
-        self.assertEqual(job["steps"][-1]["env"]["DEYE_COLLECTION_MODE"], "${{ inputs.mode }}")
+        self.assertEqual(job["steps"][-1]["env"]["DEYE_COLLECTION_MODE"], "combined")
         self.assertIn("DEYE_AUTOMATION_ENABLED", job["if"])
         self.assertIn("default_branch", job["if"])
         for step in job["steps"]:

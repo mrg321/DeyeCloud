@@ -83,12 +83,14 @@ def collection_workbook(changes, mode, day):
             summary.extend((key, record[key]) for key in ("partial", "captured_at", "latest_sample_at"))
             for key, sample in sorted(record["latest_soc"].items()):
                 summary.extend([(f"{key} (%)", sample["value"]), (f"{key} timestamp UTC", sample["timestamp"])])
-        parameters = record if path == "parameters/latest.json" else record.get("parameters", {})
+        parameters = record if path == "parameters/latest.json" else {}
+        if mode == "evening" and path.startswith("evening/"):
+            parameters = record["parameters"]
         for name, result in sorted(parameters.items()):
             settings.extend((name, key, value) for key, value in fields(result))
 
     sheets = [("Summary", summary), ("Telemetry", telemetry)]
-    if mode == "closed":
+    if mode in {"closed", "combined"}:
         sheets.append(("Daily energy", energy))
     sheets.extend([("Settings", settings), ("API responses", responses), ("Result JSON", sources)])
     output = BytesIO()

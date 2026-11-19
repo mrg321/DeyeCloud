@@ -28,7 +28,7 @@ def valid_data_path(path):
 
 
 def valid_workbook_path(path):
-    return bool(re.fullmatch(r"reports/(?:closed|evening)/\d{4}-\d{2}-\d{2}\.xlsx", path))
+    return bool(re.fullmatch(r"reports/(?:closed|evening|combined)/\d{4}-\d{2}-\d{2}\.xlsx", path))
 
 
 class GitHubPrivateStore:

@@ -180,14 +180,21 @@ def collect(client, store, *, now=None, end_date=None, originals=None, mode="clo
     """Build a full in-memory transaction, then publish once. No local data writes."""
     config = validate_config(store.read("config/installation.json"))
     started_at = now or datetime.now(timezone.utc)
-    if mode == "evening" and end_date is None:
-        today = started_at.astimezone(MADRID).date().isoformat()
-        days = [today] if today >= config["installation_start"] else []
+    today = None
+    if mode in {"evening", "combined"} and end_date is None:
+        madrid_date = started_at.astimezone(MADRID).date()
+        today = madrid_date.isoformat()
+        if today < config["installation_start"]:
+            return False
+        days = []
+        if mode == "combined":
+            first = max(date.fromisoformat(config["installation_start"]), madrid_date - timedelta(days=3))
+            days = [(first + timedelta(days=offset)).isoformat() for offset in range((madrid_date - first).days)]
     elif mode == "closed":
         days = collection_days(config, started_at, end_date)
     else:
         raise CollectionError("INVALID_COLLECTION_MODE_OR_DATE")
-    if not days:
+    if not days and today is None:
         return False
     station_id, sn = config["station_id"], config["device_sn"]
     changes, source_hashes = {}, set()
@@ -210,7 +217,7 @@ def collect(client, store, *, now=None, end_date=None, originals=None, mode="clo
         raise CollectionError("CONFIGURED_DEVICE_NOT_VERIFIED")
     metadata = query("deye_station_metadata", {"station_id": station_id})
     source_zone = (metadata.get("station") or {}).get("regionTimezone")
-    validate_timezone(source_zone, days)
+    validate_timezone(source_zone, days + ([today] if today else []))
     measures = query("deye_device_measure_points", {"device_sn": sn})
     supported = set(measures.get("measurePoints") or [])
 
@@ -237,8 +244,9 @@ def collect(client, store, *, now=None, end_date=None, originals=None, mode="clo
                     "last_available": previous.get("data") or previous.get("last_available")}
         return parameters
 
-    if mode == "evening":
-        day = days[0]
+    parameters = None
+    if today is not None:
+        day = today
         samples = read_intraday(day)
         latest = query("deye_device_latest", {"device_sns": [sn]})
         parameters = read_parameters()
@@ -261,12 +269,14 @@ def collect(client, store, *, now=None, end_date=None, originals=None, mode="clo
             "partial": True, "captured_at": cutoff, "latest_sample_at": samples[-1]["timestamp"] if samples else None,
             "latest_soc": latest_soc, "samples": samples, "parameters": parameters,
             "original_hashes": sorted(source_hashes)}
-        changes[f"reports/evening/{day}.xlsx"] = collection_workbook(changes, mode, day)
-        return store.publish(changes)
+        if mode == "evening":
+            changes[f"reports/evening/{day}.xlsx"] = collection_workbook(changes, mode, day)
+            return store.publish(changes)
 
-    dates = {"start_date": days[0], "end_date": days[-1]}
-    station = station_daily(query("deye_station_daily_history", {"station_id": station_id, **dates}), days)
-    device = device_daily(query("deye_device_daily_history", {"device_sn": sn, **dates}), days)
+    if days:
+        dates = {"start_date": days[0], "end_date": days[-1]}
+        station = station_daily(query("deye_station_daily_history", {"station_id": station_id, **dates}), days)
+        device = device_daily(query("deye_device_daily_history", {"device_sn": sn, **dates}), days)
     for day in days:
         old = store.read("daily/" + day + ".json") or {}
         old_energy = old.get("energy", {})
@@ -293,17 +303,19 @@ def collect(client, store, *, now=None, end_date=None, originals=None, mode="clo
             "consumption": device_values["Consumption"], "purchase_reported": device_values["ElectricityPurchasing"],
             "export_reported": device_values["GridFeed-in"],
             "retained_fields": retained_device, "day_returned": day in device}
-    changes["parameters/latest.json"] = read_parameters()
-    changes["state/collection.json"] = {"schema_version": 1, "last_target_date": days[-1],
-        "queried_dates": days, "original_hashes": sorted(source_hashes),
-        "backfill": end_date is not None, "timezone": "Europe/Madrid"}
-    changes[f"reports/closed/{days[-1]}.xlsx"] = collection_workbook(changes, mode, days[-1])
+    changes["parameters/latest.json"] = read_parameters() if parameters is None else parameters
+    if days:
+        changes["state/collection.json"] = {"schema_version": 1, "last_target_date": days[-1],
+            "queried_dates": days, "original_hashes": sorted(source_hashes),
+            "backfill": end_date is not None, "timezone": "Europe/Madrid"}
+    report_date = today or days[-1]
+    changes[f"reports/{mode}/{report_date}.xlsx"] = collection_workbook(changes, mode, report_date)
     return store.publish(changes)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Daily read-only collection to a private data repository.")
-    parser.add_argument("--mode", choices=("closed", "evening"), help="Select closed-day history or today's partial snapshot.")
+    parser.add_argument("--mode", choices=("closed", "evening", "combined"), help="Select the collection window.")
     parser.add_argument("--end-date", default=None, help="Optional closed date YYYY-MM-DD; reads it and three earlier dates.")
     args = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
