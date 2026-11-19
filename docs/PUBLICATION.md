@@ -61,7 +61,7 @@ Los valores de las pruebas son ficticios y no proceden de las credenciales de Wi
 
 También se excluye cada archivo bajo `.venv/`, `__pycache__/`, `.git/` y `_local/`:
 son dependencias instaladas, bytecode, metadatos de Git o material local de revisión.
-No se borran los archivos excluidos. `Configuracion.md` y `Consumos.log` están
+No se borran los archivos excluidos. `docs/Configuracion.md` y `docs/Consumos.log` están
 protegidos por las reglas de exclusión, sin modificarlos.
 
 Las pruebas no necesitan los informes privados, la propuesta local ni las skills

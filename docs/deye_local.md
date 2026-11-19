@@ -289,7 +289,7 @@ los siete días solicitados de los realmente recuperados.
 `docs/deye-phase4b-results.json` contiene resultados MCP proyectados, series
 ocultas, cobertura, errores y estadísticas por hora. El informe se entrega en
 `docs/deye-phase4b-report.md`. Se preservan los artefactos de la auditoría anterior.
-El script no abre ni escribe `Configuracion.md` o `Consumos.log`.
+El script no abre ni escribe `docs/Configuracion.md` o `docs/Consumos.log`.
 
 Para diagnosticar una ejecución ya guardada se dispone de
 `scripts/audit_deye_history_followup.py`: lee las evidencias anteriores y limita

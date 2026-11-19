@@ -171,7 +171,7 @@ Los identificadores y valores reales pueden estar completos en este repositorio
 privado, pero no salen en logs, nombres de jobs, mensajes de commit, artefactos
 ni salidas del recolector. Los informes privados que ya existan localmente se
 conservan ignorados; migrarlos al privado también queda pendiente de autorización.
-No se sobrescriben `Configuracion.md` o `Consumos.log`.
+No se sobrescriben `docs/Configuracion.md` o `docs/Consumos.log`.
 
 ## Persistencia, validación y recuperación
 
@@ -289,3 +289,14 @@ Antes de publicar o activar, repetirla sobre todo el historial que se vaya a env
 
 Hasta completar esos pasos no se ejecuta la recopilación real ni se realiza
 ninguna operación remota con los repositorios del propietario.
+
+## Propuesta de verificación diaria y recomendación de SOC
+
+Ejecutar a las 19:00 de Europe/Madrid desde un entorno con acceso al MCP local. Este procedimiento queda como diseño. El recolector de GitHub Actions descrito arriba tiene su propio flujo.
+
+1. Leer TOU y consultar telemetría intradía del inversor por variable. Recuperar SOC del inversor y BMS, potencia de batería, FV, consumo y red, y contadores de carga, descarga, compra y exportación. Unir por timestamp en hora local, conservar unidades, detectar huecos y separar las ventanas 00:00–08:00 y diurna. Obtener alarmas del inversor y la instalación con todas sus páginas. Reintentar de forma acotada si hay fallos transitorios. Releer la jornada anterior para completar datos tardíos.
+2. Evaluar si ya se alcanzaba el objetivo al inicio, si hubo carga y si se alcanzó el objetivo al cierre. Con SOC inferior al objetivo y cobertura suficiente, señalar ausencia de carga o carga insuficiente. Con mala cobertura, dejar la verificación pendiente. Acotar los cambios de potencia entre muestras y diferenciar los contadores de energía de las integraciones estimadas. Revisar exportación durante excedentes FV y capacidad de carga disponible cuando existan las señales necesarias.
+3. Registrar mediciones en `docs/Consumos.log` con clave de fecha local, fuente, intervalo y unidades. Añadir una sola entrada por fecha y completar su cobertura mediante actualización atómica de esa entrada, preservando las demás fechas y dejando trazabilidad de correcciones. Registrar en `docs/Configuracion.md` cambios confirmados y anomalías nuevas, identificados por fecha y evento. Mantener ambos registros en almacenamiento privado.
+4. Estimar el SOC a medianoche con la última lectura y el balance previsto hasta que empiece la ventana valle. Construir perfiles de consumo por intervalos usando días comparables, incluyendo la carga nocturna de la vivienda. Convertir la previsión de irradiancia en producción FV por intervalo con orientación, potencia instalada y pérdidas calibradas con días completos. Mantener escenarios bajo, central y alto según el error de previsión. Estimar la capacidad efectiva por punto de SOC, los rendimientos de carga y descarga, y el coste por kWh descargado a partir del coste neto de reposición y la energía útil esperada durante la vida de la batería.
+5. Simular cada objetivo TOU candidato de medianoche a la siguiente medianoche. Aplicar FV a las cargas y luego a la batería según los límites efectivos, las consignas TOU y el modo del inversor. Llevar el balance de energía de la batería con `E_siguiente = E_actual + η_carga × carga_AC − descarga_AC / η_descarga` usando una frontera energética coherente para FV y red. Respetar capacidad, reserva de respaldo, límites del inversor y BMS y tiempo disponible a potencia de carga. Valorar el SOC final de forma consistente entre candidatos. Aplicar el calendario de tarifas al consumo de red y compensar solo exportación facturable, considerando el límite de factura. Si el control impide exportar, el excedente recortado tiene valor de exportación cero.
+6. Elegir el SOC que minimice compra menos compensación más degradación, ponderando los escenarios y manteniendo el respaldo exigido. Comunicar el ahorro frente al 40 % vigente simulando las mismas condiciones, con rango por escenario. Si faltan entradas críticas, mantener el 40 % como recomendación provisional y marcar el ahorro como no verificable. Proponer el cambio para ambas franjas y pedir autorización expresa antes de aplicarlo. El procedimiento de análisis usa exclusivamente herramientas MCP de lectura.
