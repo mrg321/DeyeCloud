@@ -4,9 +4,14 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 import tempfile
+import sys
+import unittest
 from unittest.mock import patch, AsyncMock
 
 from mcp.shared.memory import create_connected_server_and_client_session
+
+if __name__ == "__main__" and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import deye_read_contracts as contracts
 from scripts import deye_mcp_server as server
@@ -210,3 +215,7 @@ class AuditReadTests(OfflineTestCase):
     def test_nested_redaction_and_short_serials(self):
         self.assertEqual(auditor.redact({"a": ["ABC123 appears", "AB"]}, {"ABC123", "AB"}),
                          {"a": ["***C123 appears", "***"]})
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,9 +1,14 @@
 {
   "name": "Deye daily private collection",
   "on": {
-    "schedule": [{"cron": "30 2 * * *", "timezone": "Europe/Madrid"}],
     "workflow_dispatch": {
       "inputs": {
+        "mode": {
+          "description": "Collect closed days or today's partial evening snapshot",
+          "type": "choice",
+          "default": "closed",
+          "options": ["closed", "evening"]
+        },
         "end_date": {
           "description": "Optional closed date YYYY-MM-DD; includes its three preceding days",
           "required": false,
@@ -61,6 +66,7 @@
             "DEYE_PASSWORD": "${{ secrets.DEYE_PASSWORD }}",
             "DEYE_DATA_REPOSITORY": "${{ vars.DEYE_DATA_OWNER || github.repository_owner }}/DeyeCloud-data",
             "DEYE_DATA_TOKEN": "${{ vars.DEYE_DATA_AUTH_MODE == 'pat' && secrets.DEYE_DATA_TOKEN || steps.app-token.outputs.token }}",
+            "DEYE_COLLECTION_MODE": "${{ inputs.mode }}",
             "DEYE_END_DATE": "${{ inputs.end_date }}"
           }
         }

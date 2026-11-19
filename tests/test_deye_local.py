@@ -17,6 +17,9 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.shared.memory import create_connected_server_and_client_session
 
+if __name__ == "__main__" and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from scripts import deye_client as client_module
 from scripts import deye_mcp_server as server_module
 from scripts import setup_credentials

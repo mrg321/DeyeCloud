@@ -174,11 +174,17 @@ def merge_energy(current, previous):
     return merged, sorted(retained)
 
 
-def collect(client, store, *, now=None, end_date=None, originals=None):
+def collect(client, store, *, now=None, end_date=None, originals=None, mode="closed"):
     """Build a full in-memory transaction, then publish once. No local data writes."""
     config = validate_config(store.read("config/installation.json"))
-    now = now or datetime.now(timezone.utc)
-    days = collection_days(config, now, end_date)
+    started_at = now or datetime.now(timezone.utc)
+    if mode == "evening" and end_date is None:
+        today = started_at.astimezone(MADRID).date().isoformat()
+        days = [today] if today >= config["installation_start"] else []
+    elif mode == "closed":
+        days = collection_days(config, started_at, end_date)
+    else:
+        raise CollectionError("INVALID_COLLECTION_MODE_OR_DATE")
     if not days:
         return False
     station_id, sn = config["station_id"], config["device_sn"]
@@ -205,6 +211,56 @@ def collect(client, store, *, now=None, end_date=None, originals=None):
     validate_timezone(source_zone, days)
     measures = query("deye_device_measure_points", {"device_sn": sn})
     supported = set(measures.get("measurePoints") or [])
+
+    def read_intraday(day):
+        samples = []
+        for group in POINT_GROUPS:
+            points = [key for key in group if key in supported]
+            if points:
+                data = query("deye_device_intraday_history", {"device_sn": sn, "date": day, "measure_points": points})
+                samples.extend(intraday_samples(data, points, day, source_zone))
+        return samples
+
+    def read_parameters():
+        parameters = {}
+        old_parameters = store.read("parameters/latest.json") or {}
+        for name in ("deye_read_system_settings", "deye_read_battery_settings", "deye_read_tou"):
+            try:
+                parameters[name] = {"status": "available", "data": query(name, {"device_sn": sn})}
+            except DeyeClientError as error:
+                if error.code not in OPTIONAL_ERRORS:
+                    raise
+                previous = old_parameters.get(name, {})
+                parameters[name] = {"status": error.code,
+                    "last_available": previous.get("data") or previous.get("last_available")}
+        return parameters
+
+    if mode == "evening":
+        day = days[0]
+        samples = read_intraday(day)
+        latest = query("deye_device_latest", {"device_sns": [sn]})
+        parameters = read_parameters()
+        captured_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        cutoff = captured_at.isoformat()
+        samples = sorted((sample for sample in samples if sample["timestamp"] <= cutoff),
+                         key=lambda sample: (sample["timestamp"], sample["key"]))
+        latest_soc = {sample["key"]: sample for sample in samples if sample["key"] in {"SOC", "BMSSOC"}}
+        start, end = day_bounds(day)
+        for reading in latest.get("deviceDataList") or []:
+            stamp = reading.get("collectionTime")
+            if reading.get("deviceSn") != sn or type(stamp) is not int or not start <= stamp < end or stamp > captured_at.timestamp():
+                continue
+            cached = {"dataList": [{"time": str(stamp), "itemList": reading.get("dataList") or []}]}
+            for sample in intraday_samples(cached, {"SOC", "BMSSOC"}, day, source_zone):
+                previous = latest_soc.get(sample["key"])
+                if previous is None or sample["timestamp"] >= previous["timestamp"]:
+                    latest_soc[sample["key"]] = sample
+        changes[f"evening/{day}.json"] = {"schema_version": 1, "date": day, "timezone": "Europe/Madrid",
+            "partial": True, "captured_at": cutoff, "latest_sample_at": samples[-1]["timestamp"] if samples else None,
+            "latest_soc": latest_soc, "samples": samples, "parameters": parameters,
+            "original_hashes": sorted(source_hashes)}
+        return store.publish(changes)
+
     dates = {"start_date": days[0], "end_date": days[-1]}
     station = station_daily(query("deye_station_daily_history", {"station_id": station_id, **dates}), days)
     device = device_daily(query("deye_device_daily_history", {"device_sn": sn, **dates}), days)
@@ -213,12 +269,7 @@ def collect(client, store, *, now=None, end_date=None, originals=None):
         old_energy = old.get("energy", {})
         device_values, retained_device = merge_energy(device.get(day, dict.fromkeys(ENERGY)), old_energy.get("device", {}))
         station_values, retained_station = merge_energy(station.get(day, dict.fromkeys(ENERGY.values())), old_energy.get("station", {}))
-        fresh = []
-        for group in POINT_GROUPS:
-            points = [key for key in group if key in supported]
-            if points:
-                data = query("deye_device_intraday_history", {"device_sn": sn, "date": day, "measure_points": points})
-                fresh.extend(intraday_samples(data, points, day, source_zone))
+        fresh = read_intraday(day)
         old_series = store.read("intraday/" + day + ".json") or {}
         merged = {(item["timestamp"], item["key"]): item for item in old_series.get("samples", [])}
         merged.update({(item["timestamp"], item["key"]): item for item in fresh})
@@ -239,17 +290,7 @@ def collect(client, store, *, now=None, end_date=None, originals=None):
             "consumption": device_values["Consumption"], "purchase_reported": device_values["ElectricityPurchasing"],
             "export_reported": device_values["GridFeed-in"],
             "retained_fields": retained_device, "day_returned": day in device}
-    parameters = {}
-    old_parameters = store.read("parameters/latest.json") or {}
-    for name in ("deye_read_system_settings", "deye_read_battery_settings", "deye_read_tou"):
-        try:
-            parameters[name] = {"status": "available", "data": query(name, {"device_sn": sn})}
-        except DeyeClientError as error:
-            if error.code not in OPTIONAL_ERRORS:
-                raise
-            parameters[name] = {"status": error.code,
-                "last_available": old_parameters.get(name, {}).get("data") or old_parameters.get(name, {}).get("last_available")}
-    changes["parameters/latest.json"] = parameters
+    changes["parameters/latest.json"] = read_parameters()
     changes["state/collection.json"] = {"schema_version": 1, "last_target_date": days[-1],
         "queried_dates": days, "original_hashes": sorted(source_hashes),
         "backfill": end_date is not None, "timezone": "Europe/Madrid"}
@@ -258,6 +299,7 @@ def collect(client, store, *, now=None, end_date=None, originals=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Daily read-only collection to a private data repository.")
+    parser.add_argument("--mode", choices=("closed", "evening"), help="Select closed-day history or today's partial snapshot.")
     parser.add_argument("--end-date", default=None, help="Optional closed date YYYY-MM-DD; reads it and three earlier dates.")
     args = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
@@ -273,7 +315,8 @@ def main(argv=None):
         def observer(path, payload):
             originals.append({"path": path, "payload": clean_original(payload, secrets + [client._token or ""])})
         client = DeyeClient(auth_mode="environment", read_observer=observer, min_interval=2.1, max_requests=32)
-        collect(client, store, end_date=args.end_date or os.environ.get("DEYE_END_DATE") or None, originals=originals)
+        collect(client, store, end_date=args.end_date or os.environ.get("DEYE_END_DATE") or None,
+                originals=originals, mode=args.mode or os.environ.get("DEYE_COLLECTION_MODE") or "closed")
         print("Daily collection completed; private data only.")
         return 0
     except Exception:

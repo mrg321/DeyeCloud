@@ -24,7 +24,7 @@ def blob_sha(content):
 def valid_data_path(path):
     return bool(re.fullmatch(
         r"(?:config/installation\.json|state/collection\.json|parameters/latest\.json|"
-        r"originals/[a-f0-9]{64}\.json|(?:daily|intraday|consumption)/\d{4}-\d{2}-\d{2}\.json)", path))
+        r"originals/[a-f0-9]{64}\.json|(?:daily|intraday|consumption|evening)/\d{4}-\d{2}-\d{2}\.json)", path))
 
 
 class GitHubPrivateStore:

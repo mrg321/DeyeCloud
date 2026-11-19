@@ -7,16 +7,21 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import sys
 import unittest
 from contextlib import ExitStack, redirect_stdout
 from unittest.mock import patch
 
 import requests
 
+if __name__ == "__main__" and not __package__:
+    # Running this file directly puts tests/ on sys.path instead of the repository root.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from scripts import collect_deye_daily as collector
 from scripts import deye_client as client_module
 from scripts.deye_history_quality import day_bounds
-from scripts.deye_private_store import GitHubPrivateStore, PrivateStoreError, canonical, blob_sha
+from scripts.deye_private_store import GitHubPrivateStore, PrivateStoreError, canonical, blob_sha, valid_data_path
 
 FAKE = "FAKE_SECRET_FOR_OFFLINE_TESTS"
 CONFIG = {"station_id": 123, "device_sn": "SIM123", "installation_start": "2026-01-01", "timezone": "Europe/Madrid"}
@@ -113,6 +118,40 @@ class Offline(unittest.TestCase):
 
 
 class CollectorTests(Offline):
+    def test_evening_snapshot_uses_madrid_today_and_keeps_closed_history_separate(self):
+        now = datetime(2026, 10, 25, 23, 30, tzinfo=timezone.utc)
+        today = "2026-10-26"
+        start, _ = day_bounds(today)
+
+        class EveningDeye(FakeDeye):
+            def query_read(self, name, args):
+                result = super().query_read(name, args)
+                if name == "deye_device_latest":
+                    return {"deviceDataList": [{"deviceSn": "SIM123", "collectionTime": start + 900,
+                        "dataList": [{"key": "SOC", "value": "62", "unit": "%"}]}]}
+                if name == "deye_device_intraday_history":
+                    row = result["dataList"][0]
+                    result["dataList"] = [{**row, "time": str(start + 600)}, row]
+                return result
+
+        store, client = MemoryStore(), EveningDeye()
+        self.assertTrue(collector.collect(client, store, now=now, mode="evening"))
+        path = f"evening/{today}.json"
+        self.assertTrue(valid_data_path(path))
+        self.assertEqual(set(store.files), {"config/installation.json", path})
+        snapshot = store.files[path]
+        self.assertTrue(snapshot["partial"])
+        self.assertEqual(snapshot["captured_at"], now.isoformat())
+        self.assertEqual(snapshot["latest_sample_at"], "2026-10-25T23:10:00+00:00")
+        self.assertEqual(len(snapshot["samples"]), 8)
+        self.assertEqual(snapshot["latest_soc"]["SOC"]["value"], 62)
+        self.assertEqual(snapshot["latest_soc"]["BMSSOC"]["value"], 30)
+        self.assertEqual(snapshot["parameters"]["deye_read_tou"]["status"], "UNSUPPORTED_CONFIG_POINT")
+        self.assertFalse(any(name in {"deye_station_daily_history", "deye_device_daily_history"}
+                             for name, _ in client.calls))
+        with self.assertRaises(collector.CollectionError):
+            collector.collect(client, store, now=now, mode="evening", end_date=today)
+
     def test_four_closed_dates_dst_and_installation_boundary(self):
         self.assertEqual(collector.collection_days(CONFIG, NOW), ["2026-10-22", "2026-10-23", "2026-10-24", "2026-10-25"])
         self.assertEqual(day_bounds("2026-10-25")[1] - day_bounds("2026-10-25")[0], 90000)
@@ -321,12 +360,16 @@ class PrivateStoreTests(Offline):
 class WorkflowTests(unittest.TestCase):
     def test_workflow_has_no_public_writes_artifacts_or_untrusted_trigger(self):
         workflow = json.loads((Path(__file__).resolve().parents[1] / ".github/workflows/deye-daily.yml").read_text())
-        self.assertEqual(set(workflow["on"]), {"schedule", "workflow_dispatch"})
-        self.assertEqual(workflow["on"]["schedule"], [{"cron": "30 2 * * *", "timezone": "Europe/Madrid"}])
+        self.assertEqual(set(workflow["on"]), {"workflow_dispatch"})
+        self.assertFalse(workflow["on"]["workflow_dispatch"]["inputs"]["end_date"]["required"])
+        mode = workflow["on"]["workflow_dispatch"]["inputs"]["mode"]
+        self.assertEqual(mode["default"], "closed")
+        self.assertEqual(mode["options"], ["closed", "evening"])
         self.assertFalse(workflow["concurrency"]["cancel-in-progress"])
         job = workflow["jobs"]["collect"]
         self.assertEqual(job["permissions"], {"contents": "read"})
         self.assertEqual(job["timeout-minutes"], 15)
+        self.assertEqual(job["steps"][-1]["env"]["DEYE_COLLECTION_MODE"], "${{ inputs.mode }}")
         self.assertIn("DEYE_AUTOMATION_ENABLED", job["if"])
         self.assertIn("default_branch", job["if"])
         for step in job["steps"]:

@@ -3,8 +3,14 @@
 import asyncio
 from datetime import datetime, timezone
 import json
+from pathlib import Path
+import sys
+import unittest
 
 from mcp.shared.memory import create_connected_server_and_client_session
+if __name__ == "__main__" and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from scripts import deye_read_contracts as contracts
 from scripts import deye_mcp_server as server
 from scripts import deye_history_quality as quality
@@ -228,3 +234,7 @@ class HistoryTests(OfflineTestCase):
         session = Session(fail=True)
         result = asyncio.run(audit.collect(session, now=datetime(2026, 11, 17, 12, tzinfo=timezone.utc), pace=0))
         self.assertEqual(session.calls[-1], "deye_station_metadata")
+
+
+if __name__ == "__main__":
+    unittest.main()

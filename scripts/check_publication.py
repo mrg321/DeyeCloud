@@ -8,13 +8,15 @@ import subprocess
 
 PUBLIC_FILES = frozenset({
     ".gitignore", "README.md", "requirements.txt", "requirements-actions.txt",
+    ".vscode/launch.json", ".vscode/settings.json",
     ".github/workflows/deye-daily.yml", "config/deye_local.example.toml", "config/data.example.json",
     "docs/PUBLICATION.md", "docs/deye_local.md", "docs/automation.md",
     "scripts/setup_credentials.py", "scripts/deye_client.py", "scripts/deye_read_contracts.py",
     "scripts/deye_mcp_server.py", "scripts/deye_history_quality.py", "scripts/debug_deye_client.py",
     "scripts/audit_deye_readonly.py", "scripts/audit_deye_history.py", "scripts/audit_deye_history_followup.py",
     "scripts/report_deye_history_quality.py", "scripts/deye_private_store.py", "scripts/collect_deye_daily.py",
-    "scripts/check_publication.py", "tests/test_deye_local.py", "tests/test_deye_audit.py",
+    "scripts/check_publication.py", "scripts/Invoke-DeyeDaily.ps1",
+    "tests/test_deye_local.py", "tests/test_deye_audit.py",
     "tests/test_deye_history.py", "tests/test_daily_collection.py", "tests/test_publication.py",
 })
 PATTERNS = {

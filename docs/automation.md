@@ -36,8 +36,8 @@ de lectura se procesan en memoria y se guardan únicamente en el repositorio pri
    privado, con `Contents: write`. Alternativamente, PAT de alcance fino explícito.
 4. Lectura de `config/installation.json` desde el repositorio privado y validación
    de instalación, inversor, pertenencia del dispositivo y zona horaria.
-5. Consulta del **último día completo de Europe/Madrid y sus tres días anteriores**,
-   excluyendo fechas anteriores a `installation_start`. No se consulta el día actual.
+5. En modo `closed`, consulta del **último día completo de Europe/Madrid y sus
+   tres días anteriores**, excluyendo fechas anteriores a `installation_start`.
 6. Recuperación de resúmenes diarios de instalación/dispositivo y dos grupos de
    curvas por día: SOC/temperaturas y potencias FV/vivienda/red/batería. Solo se
    solicitan claves que el inversor declare disponibles. Se leen también los
@@ -45,35 +45,37 @@ de lectura se procesan en memoria y se guardan únicamente en el repositorio pri
 7. Validación y construcción de todos los cambios en memoria. Publicación mediante
    una única actualización no forzada de la referencia `main` del repositorio privado.
 
-La ejecución manual admite únicamente `end_date`, una fecha cerrada `YYYY-MM-DD`.
-Consulta esa fecha y las tres anteriores, respetando el comienzo de la instalación.
-Permite recuperar interrupciones largas por bloques de cuatro fechas. Nunca se
-introducen estaciones, series, coordenadas, credenciales o parámetros reales en
-los inputs públicos de un workflow.
+El modo `evening` consulta las curvas intradía de hoy en `Europe/Madrid`, el SOC
+más reciente disponible de hoy y los parámetros de sistema, batería y TOU.
+Guarda una instantánea parcial con hora de captura y de última muestra. Una
+nueva captura del mismo día actualiza esa instantánea. El modo `closed` admite
+`end_date` para recuperar una fecha cerrada y las tres anteriores. Los inputs
+públicos del workflow contienen como máximo el modo y la fecha.
 
-## Programación, cambios de horario y límites de GitHub
+## Programación externa
 
-El archivo `.github/workflows/deye-daily.yml` es JSON, un subconjunto válido de
-YAML; las pruebas pueden analizarlo con la biblioteca estándar, sin instalar
-un parser adicional. Usa `schedule: cron '30 2 * * *', timezone 'Europe/Madrid'`
-y `workflow_dispatch`. No tiene triggers `push`, `pull_request` o
-`pull_request_target`, ni ejecuta código de ramas distintas de la predeterminada.
-Las Actions de checkout, Python y token de App están fijadas por SHA completo.
+El workflow usa `workflow_dispatch` para las ejecuciones manuales y las peticiones
+del programador externo. Publica el workflow en la rama predeterminada y configura
+`DEYE_AUTOMATION_ENABLED=true` en GitHub para habilitar el job.
 
-GitHub permite actualmente zonas IANA en `schedule`. En el salto de primavera,
-su documentación desplaza una programación de las 02:30 a las 03:00. La hora
-repetida de otoño no se usa como garantía de una única ejecución: los datos se
-actualizan por fecha y la persistencia soporta ejecuciones duplicadas. Los límites
-de día proceden de `zoneinfo`/`tzdata`, con días de 23, 24 o 25 horas, no de restar
-86400 segundos. [Sintaxis oficial de programación](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onschedule).
+Para planificar el día siguiente, configura una petición diaria a las 19:00 en
+`Europe/Madrid` con el modo `evening`. Si también necesitas los totales cerrados,
+configura otra petición a las 03:30 con el modo `closed`.
 
-La programación no garantiza puntualidad: puede retrasarse y GitHub puede omitir
-ejecuciones durante congestión. Solo funciona en la rama predeterminada. Además,
-en repositorios públicos GitHub desactiva los workflows programados tras 60 días
-sin actividad en ese repositorio; los commits del repositorio privado **no son una
-estrategia de mantenimiento de actividad del público**. Hay que vigilar ese estado
-y reactivarlo con autorización si ocurre. No se generan commits públicos de
-relleno. [Eventos y restricciones oficiales](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+- Método `POST`
+- URL `https://api.github.com/repos/mrg321/DeyeCloud/actions/workflows/deye-daily.yml/dispatches`
+- Cabeceras `Authorization: Bearer <TOKEN>`, `Accept: application/vnd.github+json`
+  y `Content-Type: application/json`
+- Cuerpo para la tarde `{"ref":"main","inputs":{"mode":"evening"}}`.
+- Cuerpo para el cierre `{"ref":"main","inputs":{"mode":"closed"}}`.
+  Para un relleno manual, indica `end_date` en `inputs` con el modo `closed`.
+
+Usa un token fine-grained dedicado al repositorio público `mrg321/DeyeCloud`, con
+el permiso de repositorio **Actions: Read and write**. Guarda ese token como
+cabecera en el programador. GitHub genera dentro del workflow el token para el
+repositorio privado cuando está configurado el modo GitHub App. Comprueba en
+GitHub Actions que la ejecución terminó correctamente después de probar el envío.
+[API de GitHub para ejecutar workflows](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event).
 
 Concurrencia: un grupo para todas las ejecuciones, `cancel-in-progress: false`;
 timeout de 15 minutos. GitHub no garantiza conservar una cola ilimitada de
@@ -156,6 +158,7 @@ DeyeCloud-data/                   # privado, rama main
   daily/YYYY-MM-DD.json           # energía diaria por fuente y calidad
   intraday/YYYY-MM-DD.json        # muestras por timestamp/medida, unidades explícitas
   consumption/YYYY-MM-DD.json     # consumo, compra y exportación reportados
+  evening/YYYY-MM-DD.json         # instantánea parcial para planificar el día siguiente
   parameters/latest.json         # parámetros leídos; puntos no admitidos diferenciados
   state/collection.json           # última ventana consultada y hashes de originales
 ```
@@ -212,6 +215,36 @@ No se sobrescriben `docs/Configuracion.md` o `docs/Consumos.log`.
   siguiente recupera la ventana solapada; interrupciones mayores requieren un
   backfill manual por bloques. `last_target_date` describe la última consulta,
   no garantiza que existieran datos en todas sus fechas.
+
+## Ejecutar el recolector desde PowerShell
+
+Desde la raíz del repositorio, con el entorno `.venv` preparado como indica el
+README, ejecuta las comprobaciones del workflow sin credenciales de Deye ni GitHub:
+
+```powershell
+.\scripts\Invoke-DeyeDaily.ps1 -CheckOnly
+```
+
+El script instala las dependencias fijadas en `requirements-actions.txt`, audita
+el árbol y el historial Git y ejecuta las pruebas offline del recolector. Usa
+`-PythonPath` para seleccionar otro intérprete, por ejemplo un entorno de Python
+3.12 como el de GitHub Actions. Cualquier fallo detiene la ejecución.
+
+Para recolectar, proporciona `DEYE_APP_ID`, `DEYE_APP_SECRET`, `DEYE_EMAIL`,
+`DEYE_PASSWORD` y `DEYE_DATA_TOKEN` en el entorno del proceso de PowerShell.
+El token puede ser un token de instalación vigente de la GitHub App o el PAT
+fine-grained descrito arriba, con acceso de escritura a `DeyeCloud-data`.
+La emisión y revocación del token de instalación se gestionan fuera del script.
+
+```powershell
+$env:DEYE_AUTOMATION_ENABLED = 'true'
+.\scripts\Invoke-DeyeDaily.ps1 -DataOwner '<propietario>'
+```
+
+`DEYE_DATA_OWNER` puede sustituir a `-DataOwner`. `-EndDate YYYY-MM-DD` permite
+elegir una fecha cerrada e incluye sus tres días anteriores. Sin fecha explícita,
+el recolector usa su ventana habitual en `Europe/Madrid`. La ejecución es manual
+y escribe en el repositorio privado mediante el mismo recolector del workflow.
 
 ## Preparación local y comprobaciones realizadas
 
