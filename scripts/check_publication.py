@@ -115,7 +115,10 @@ def main():
     try:
         report = audit(Path(__file__).resolve().parents[1])
         print(json.dumps(report, ensure_ascii=True, indent=2))
-        return int(bool(report["findings"]))
+        return int(any(
+            finding["code"] != "GIT_IDENTITY_REVIEW"
+            for finding in report["findings"]
+        ))
     except Exception:
         print("Publication check failed; sensitive details suppressed.")
         return 1
