@@ -1,0 +1,30 @@
+{
+  "latitude": 40.416,
+  "longitude": -3.703,
+  "pv_kwp": 5,
+  "tilt": 30,
+  "azimuth": 0,
+  "pv_losses": 0.14,
+  "battery_nominal_kwh": 12,
+  "battery_usable_kwh": 10.8,
+  "reserve_soc": 30,
+  "targets": [40, 50, 60, 70, 80],
+  "charge_efficiency": 0.94,
+  "discharge_efficiency": 0.94,
+  "grid_kw": 4.6,
+  "battery_kw": 3,
+  "prices": {"valley": 0.085, "flat": 0.1201, "peak": 0.193},
+  "weekday_periods": [[0, 8, "valley"], [8, 10, "flat"], [10, 14, "peak"], [14, 18, "flat"], [18, 22, "peak"], [22, 24, "flat"]],
+  "export_price": 0.06,
+  "holidays": {
+    "2026": ["01-01", "01-06", "05-01", "08-15", "10-12", "11-01", "12-06", "12-08", "12-25"],
+    "2027": ["01-01", "01-06", "05-01", "08-15", "10-12", "11-01", "12-06", "12-08", "12-25"]
+  },
+  "history_days": 180,
+  "min_profiles": 3,
+  "max_soc_age_minutes": 90,
+  "pv_uncertainty": 0.15,
+  "load_uncertainty": 0.10,
+  "minimum_saving_eur": 0.10,
+  "fallback": "hold"
+}
