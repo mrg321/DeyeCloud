@@ -64,7 +64,10 @@ resultados también aparecen en la pestaña **Recommendation** del informe
 Madrid. La pestaña indica la fecha objetivo del día siguiente y resume la
 previsión, el SOC observado, los objetivos de carga, el consumo, el coste,
 el ahorro y el motivo de la decisión. El JSON conserva el detalle horario
-y las opciones simuladas.
+y las opciones simuladas. Para cada alternativa, la pestaña muestra la
+energía comprada para cargar la batería y el ahorro acumulado frente al TOU
+actual. El horizonte abarca el día objetivo completo en Madrid (23, 24 o 25
+horas según el cambio horario). Una cifra negativa indica un sobrecoste.
 
 Los reintentos conservan el primer informe, incluso si el informe documenta un fallo
 meteorológico. La concurrencia del workflow y el commit no forzado evitan
@@ -100,8 +103,43 @@ recomendación, elimina o deshabilita `DEYE_RECOMMENDATION_ENABLED`.
   directo, carga solar, descarga, importación y exportación. Se consideran
   conversiones, reserva y límites configurables. El escenario de referencia
   conserva los dos objetivos reales, aunque sean distintos o superen los
-  niveles candidatos. Se exige superar el ahorro mínimo con las variaciones
-  configuradas de consumo y FV antes de recomendar un cambio.
+  niveles candidatos. Se evalúan las mismas variaciones de consumo y FV
+  para cada alternativa y para el TOU vigente.
+- `current_targets` conserva los dos objetivos observados. `optimal_soc`
+  identifica la opción de menor coste del escenario central y
+  `recommended_soc` refleja la decisión tras aplicar la política y las
+  condiciones de seguridad. Si los dos objetivos difieren, consulta
+  `optimal_targets` o `current_targets` para ver ambos valores.
+  `gross_saving_eur` conserva el ahorro del óptimo incluso cuando
+  `decision_reason` explica por qué se mantiene el TOU actual. La falta de
+  perfiles comparables reduce la confianza. Si existen algunos perfiles
+  válidos por debajo del mínimo, se muestran los costes y se aplica la política
+  conservadora.
+- Con precio de importación plano no hay arbitraje horario. La simulación
+  cobra la energía comprada para cargar y solo descuenta la energía útil
+  descargada al atender consumo. Cada opción registra la energía almacenada
+  inicial y final, la carga, la descarga y las pérdidas de conversión.
+- `optimization_policy` identifica la política. Primero se busca el menor
+  coste entre opciones cuyo ahorro supera `minimum_saving_eur` en todos los
+  escenarios. El valor inicial de **0,10 €** evita cambios por diferencias
+  pequeñas. Con tarifa plana se descarta aumentar cualquiera de los dos
+  objetivos. Una opción que sube un objetivo y baja el otro se trata como aumento.
+- Una reducción debe evitar al menos `minimum_avoided_grid_charge_kwh`
+  en todos los escenarios. El valor inicial de **2 kWh** exige una reducción
+  material. Si ninguna opción supera el umbral económico, una reducción
+  puede recomendarse con el motivo `AVOID_UNNECESSARY_GRID_CHARGING`.
+  `maximum_grid_reduction_cost_increase_eur` limita el sobrecoste tolerable en
+  el peor escenario para esa regla. Empieza en **0 €** y se aplica **0 €**
+  también con confianza baja, aunque se configure una tolerancia mayor.
+  El informe distingue ahorro monetario, carga evitada y pérdidas evitadas.
+- `backup_reserve_soc` y `backup_autonomy_kwh` son restricciones de respaldo
+  opcionales. Empiezan en **0**, de modo que la reserva operativa existente
+  sigue rigiendo mientras no haya un requisito adicional. La autonomía expresa
+  kWh entregables por encima de esa reserva y se convierte a SOC considerando
+  la eficiencia de descarga. Si se configura un respaldo, ambos objetivos y
+  el mínimo SOC simulado desde las 05:00 deben alcanzar el mayor de los límites
+  en todos los escenarios. La comprobación usa el SOC horario simulado y
+  conserva los parámetros existentes del inversor.
 - Los costes son variables y antes de impuestos. El modelo usa una hora por
   intervalo, aproxima la actuación de TOU y no asigna valor residual a la
   energía al final del día. La capacidad efectiva de la batería, su potencia y

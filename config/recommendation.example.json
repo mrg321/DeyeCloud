@@ -26,5 +26,9 @@
   "pv_uncertainty": 0.15,
   "load_uncertainty": 0.10,
   "minimum_saving_eur": 0.10,
+  "minimum_avoided_grid_charge_kwh": 2,
+  "maximum_grid_reduction_cost_increase_eur": 0,
+  "backup_reserve_soc": 0,
+  "backup_autonomy_kwh": 0,
   "fallback": "hold"
 }

@@ -88,7 +88,27 @@ def add_recommendation_sheet(workbook, report):
         ("Explanation", result.get("explanation")),
         ("Forecast issues", ", ".join(forecast.get("issues", []))),
         ("Recommendation issues", ", ".join(result.get("issues", []))),
+        ("Lowest-cost battery SOC (%)", result.get("optimal_soc")),
+        ("Lowest estimated cost (EUR)", result.get("optimal_cost_eur")),
+        ("Gross saving at lowest cost (EUR)", result.get("gross_saving_eur")),
+        ("Minimum saving required (EUR)", result.get("minimum_saving_eur")),
+        ("Decision reason", result.get("decision_reason")),
+        ("Optimization policy", result.get("optimization_policy")),
+        ("Avoided grid-to-battery energy (kWh)", result.get("avoided_grid_charge_kwh")),
+        ("Avoided battery conversion losses (kWh)", result.get("avoided_conversion_loss_kwh")),
     ]
+    horizon = result.get("decision_horizon", {})
+    if horizon:
+        rows.extend([("Decision horizon start (Madrid)", horizon["start"]),
+                     ("Decision horizon end, exclusive (Madrid)", horizon["end_exclusive"]),
+                     ("Decision horizon duration (h)", horizon["hours"])])
+    for option in result.get("options", []):
+        targets = " / ".join(str(target) for target in option["targets"]) + " %"
+        if option["targets"] == result.get("current_targets"):
+            targets += " (current TOU)"
+        rows.extend([(f"{targets} — Grid-to-battery energy (kWh)", option.get("grid_to_battery_kwh")),
+                     (f"{targets} — Cumulative saving vs current TOU (EUR)",
+                      option.get("cumulative_saving_eur", option.get("saving_eur")))])
     sheet = worksheet(rows).encode("utf-8")
     output = BytesIO()
     with ZipFile(BytesIO(workbook)) as source:

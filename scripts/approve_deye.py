@@ -72,6 +72,10 @@ def issue_text(payload, identity, report):
         f"**Hora límite (Madrid):** {payload['expires_at']}",
         explanation,
     ]
+    if result.get("gross_saving_eur") is not None:
+        body.insert(12, f"Mejor SOC por coste: {value(result, 'optimal_soc', ' %')}. "
+                    f"Ahorro bruto: {result['gross_saving_eur']:.6f} EUR. "
+                    f"Mínimo exigido: {result['minimum_saving_eur']:.6f} EUR.")
     if payload["actionable"]:
         body += ["Comenta exactamente uno de estos comandos:", "~~~text",
                  *(f"/deye {command} {payload['date']} {identity}" for command in DECISIONS), "~~~"]

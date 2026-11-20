@@ -53,6 +53,9 @@ def settings(override=None, *, require_installation=False):
         "grid_kw": (0.1, 100), "battery_kw": (0.1, 100), "export_price": (0, 10),
         "max_soc_age_minutes": (1, 240), "pv_uncertainty": (0, 0.9),
         "load_uncertainty": (0, 0.9), "minimum_saving_eur": (0, 100),
+        "minimum_avoided_grid_charge_kwh": (0.001, 2400),
+        "maximum_grid_reduction_cost_increase_eur": (0, 100),
+        "backup_reserve_soc": (0, 100), "backup_autonomy_kwh": (0, 500),
     }
     if not all(bounded(config[key], *bounds) for key, bounds in limits.items()):
         raise ValueError("INVALID_RECOMMENDATION_SETTING")
@@ -248,9 +251,16 @@ def evening_state(snapshot, now, config):
     return soc, targets, soc_time
 
 
+def import_price(hour, kind, config):
+    period = "valley" if kind != "weekday" else next(
+        name for start, end, name in config["weekday_periods"] if start <= hour < end)
+    return config["prices"][period]
+
+
 def simulate(hours, load, pv, initial, targets, kind, config):
     capacity = config["battery_usable_kwh"]
     battery = initial * capacity / 100
+    minimum_battery_after_first_slot = capacity
     charge_eff, discharge_eff = config["charge_efficiency"], config["discharge_efficiency"]
     power = config["battery_kw"]
     cost = imports = exports = grid_charge = discharge = daytime_discharge = direct_pv = pv_charge = 0.0
@@ -261,8 +271,6 @@ def simulate(hours, load, pv, initial, targets, kind, config):
         solar_input = min(surplus, power, (capacity - battery) / charge_eff)
         battery += solar_input * charge_eff
         pv_charge += solar_input
-        period = "valley" if kind != "weekday" else next(
-            name for start, end, name in config["weekday_periods"] if start <= hour < end)
         floor = config["reserve_soc"]
         grid_input = 0.0
         if hour < 8:
@@ -274,6 +282,9 @@ def simulate(hours, load, pv, initial, targets, kind, config):
         battery -= delivered / discharge_eff
         # Keep numerical drift from producing negative charge headroom.
         battery = min(capacity, battery)
+        # The first slot ends at 05:00. Check its achieved charge and every subsequent hour.
+        if hour >= 4:
+            minimum_battery_after_first_slot = min(minimum_battery_after_first_slot, battery)
         bought, sold = deficit - delivered + grid_input, surplus - solar_input
         imports += bought
         exports += sold
@@ -281,9 +292,13 @@ def simulate(hours, load, pv, initial, targets, kind, config):
         discharge += delivered
         if hour >= 8:
             daytime_discharge += delivered
-        cost += bought * config["prices"][period] - sold * config["export_price"]
+        cost += bought * import_price(hour, kind, config) - sold * config["export_price"]
     return {"cost_eur": cost, "grid_import_kwh": imports, "grid_export_kwh": exports,
             "grid_to_battery_kwh": grid_charge, "pv_to_battery_kwh": pv_charge,
+            "battery_start_kwh": initial * capacity / 100, "battery_end_kwh": battery,
+            "minimum_soc_from_05": minimum_battery_after_first_slot / capacity * 100,
+            "battery_charge_loss_kwh": (grid_charge + pv_charge) * (1 - charge_eff),
+            "battery_discharge_loss_kwh": discharge * (1 / discharge_eff - 1),
             "direct_pv_self_consumption_kwh": direct_pv, "battery_output_kwh": discharge,
             "battery_output_08_24_kwh": daytime_discharge, "end_soc": battery / capacity * 100}
 
@@ -291,7 +306,8 @@ def simulate(hours, load, pv, initial, targets, kind, config):
 def recommendation(target, now, weather, selected, snapshot, config):
     soc, baseline, soc_time = evening_state(snapshot, now, config)
     kind = day_type(target, config)
-    hours = [datetime.fromtimestamp(stamp, MADRID).hour for stamp in hour_starts(target)]
+    stamps = hour_starts(target)
+    hours = [datetime.fromtimestamp(stamp, MADRID).hour for stamp in stamps]
     profile = [median(row[1][h] for row in selected) for h in range(24)] if selected else None
     load = [profile[h] for h in hours] if profile else None
     historical = {}
@@ -310,7 +326,12 @@ def recommendation(target, now, weather, selected, snapshot, config):
     if kind is None:
         reasons.append("MISSING_HOLIDAY_CALENDAR")
     report = {"day_type": kind, "current_soc": soc, "soc_measured_at": soc_time,
-              "current_targets": baseline, "recommended_soc": None,
+              "current_targets": baseline, "recommended_soc": None, "optimal_soc": None,
+              "optimal_targets": None, "optimal_cost_eur": None, "gross_saving_eur": None,
+              "optimal_minimum_scenario_saving_eur": None, "minimum_saving_eur": config["minimum_saving_eur"],
+              "decision_reason": reasons[0] if reasons else None,
+              "optimization_policy": "COST_THEN_AVOID_GRID_CHARGING",
+              "avoided_grid_charge_kwh": None, "avoided_conversion_loss_kwh": None,
               "decision": "hold" if baseline and config["fallback"] == "hold" else "abstain",
               "confidence": "low", "issues": reasons, "historic_days": [str(row[0]) for row in selected],
               "historical_medians_kwh": historical, "battery_nominal_kwh": config["battery_nominal_kwh"],
@@ -320,18 +341,20 @@ def recommendation(target, now, weather, selected, snapshot, config):
               "expected_load_08_24_kwh": sum(value for hour, value in zip(hours, load) if hour >= 8) if load else None,
               "forecast_pv_kwh": weather.get("pv_kwh"), "expected_cost_eur": None,
               "estimated_saving_eur": None, "expected_battery_output_08_24_kwh": None}
-    if reasons:
+    if any(reason != "INSUFFICIENT_HOUSEHOLD_PROFILES" for reason in reasons) or not selected:
         if report["decision"] == "hold" and baseline[0] == baseline[1]:
             report["recommended_soc"] = baseline[0]
         report["explanation"] = "Datos insuficientes o inconsistentes. Se descarta proponer un cambio de SOC."
         return report
     pv = [row["pv_kwh"] for row in weather["hours"]]
-    # Estimate evening discharge until midnight with the historical load and no PV credit.
+    # Estimate discharge until midnight from historical demand, power and reserve.
     local = datetime.fromisoformat(soc_time).astimezone(MADRID)
-    remaining = profile[local.hour] * (3600 - local.minute * 60 - local.second) / 3600
-    remaining += sum(profile[local.hour + 1:])
-    initial = max(min(soc, config["reserve_soc"]), soc - (
-        remaining / config["discharge_efficiency"] / config["battery_usable_kwh"] * 100))
+    available = max(0, soc - config["reserve_soc"]) / 100 * config["battery_usable_kwh"]
+    remaining_fraction = (3600 - local.minute * 60 - local.second) / 3600
+    remaining = min(profile[local.hour], config["battery_kw"]) * remaining_fraction
+    remaining += sum(min(value, config["battery_kw"]) for value in profile[local.hour + 1:])
+    projected_discharge = min(remaining, available * config["discharge_efficiency"])
+    initial = soc - projected_discharge / config["discharge_efficiency"] / config["battery_usable_kwh"] * 100
     scenarios = [(1, 1)] + [(1 + load_sign * config["load_uncertainty"],
                              1 + pv_sign * config["pv_uncertainty"])
                             for load_sign in (-1, 1) for pv_sign in (-1, 1)]
@@ -340,30 +363,113 @@ def recommendation(target, now, weather, selected, snapshot, config):
         outcomes[setting] = [simulate(hours, [x * lf for x in load], [x * pf for x in pv],
                                       initial, setting, kind, config) for lf, pf in scenarios]
     reference = outcomes[tuple(baseline)]
+    comparable_season = (target.month % 12) // 3
+    same_type_season = sum(day_type(row[0], config) == kind and (row[0].month % 12) // 3 == comparable_season
+                           for row in selected)
+    confidence = ("medium" if same_type_season >= config["min_profiles"]
+                  and weather.get("confidence") != "low" else "low")
+    prices = {import_price(hour, kind, config) for hour in hours}
+    flat_price = next(iter(prices)) if len(prices) == 1 else None
+    backup_required = bool(config["backup_reserve_soc"] or config["backup_autonomy_kwh"])
+    backup_floor = max(config["backup_reserve_soc"], config["reserve_soc"] +
+                       100 * config["backup_autonomy_kwh"] /
+                       (config["battery_usable_kwh"] * config["discharge_efficiency"]))
+    minimum_grid_reduction = config["minimum_avoided_grid_charge_kwh"]
+    max_extra_cost = config["maximum_grid_reduction_cost_increase_eur"] if confidence != "low" else 0
+    threshold = config["minimum_saving_eur"]
     options = []
     for setting, outcomes_by_scenario in outcomes.items():
         savings = [base["cost_eur"] - option["cost_eur"]
                    for base, option in zip(reference, outcomes_by_scenario)]
-        options.append({"targets": list(setting), **outcomes_by_scenario[0],
-                        "saving_eur": savings[0], "minimum_scenario_saving_eur": min(savings)})
-    viable = [row for row in options[1:] if row["minimum_scenario_saving_eur"] > 0
-              and row["minimum_scenario_saving_eur"] >= config["minimum_saving_eur"]]
-    best = min(viable, key=lambda row: (row["cost_eur"], row["targets"])) if viable else options[0]
+        avoided = [base["grid_to_battery_kwh"] - option["grid_to_battery_kwh"]
+                   for base, option in zip(reference, outcomes_by_scenario)]
+        central = outcomes_by_scenario[0]
+        losses = ("battery_charge_loss_kwh", "battery_discharge_loss_kwh")
+        avoided_losses = sum(reference[0][key] - central[key] for key in losses)
+        minimum_soc = min(row["minimum_soc_from_05"] for row in outcomes_by_scenario)
+        backup_ok = not backup_required or min(min(setting), minimum_soc) + 1e-9 >= backup_floor
+        increases = any(candidate > current for candidate, current in zip(setting, baseline))
+        reduces = setting != tuple(baseline) and not increases
+        policy_reason = None
+        if setting != tuple(baseline) and not reasons:
+            if not backup_ok:
+                policy_reason = "BACKUP_RESERVE_NOT_MET"
+            elif increases and flat_price is not None:
+                policy_reason = "FLAT_TARIFF_NO_GRID_ARBITRAGE"
+            elif reduces and min(avoided) + 1e-9 < minimum_grid_reduction:
+                policy_reason = "INSUFFICIENT_GRID_CHARGING_REDUCTION"
+            elif min(savings) > threshold:
+                policy_reason = "ROBUST_SAVING_MEETS_THRESHOLD"
+            elif reduces and min(savings) + 1e-9 >= -max_extra_cost:
+                policy_reason = "AVOID_UNNECESSARY_GRID_CHARGING"
+        options.append({"targets": list(setting), **central,
+                        "saving_eur": savings[0], "cumulative_saving_eur": savings[0],
+                        "avoided_grid_charge_kwh": avoided[0], "minimum_avoided_grid_charge_kwh": min(avoided),
+                        "avoided_conversion_loss_kwh": avoided_losses, "backup_reserve_met": backup_ok,
+                        "policy_reason": policy_reason,
+                        "minimum_scenario_saving_eur": min(savings)})
+    optimal = min(options, key=lambda row: row["cost_eur"])
+    economic = [row for row in options if row["policy_reason"] == "ROBUST_SAVING_MEETS_THRESHOLD"]
+    reductions = [row for row in options if row["policy_reason"] == "AVOID_UNNECESSARY_GRID_CHARGING"]
+    viable = economic or reductions
+    best = min(viable, key=lambda row: (row["cost_eur"], -row["avoided_grid_charge_kwh"])) if viable else options[0]
     targets = best["targets"]
-    comparable_season = (target.month % 12) // 3
-    same_type_season = sum(day_type(row[0], config) == kind and (row[0].month % 12) // 3 == comparable_season
-                           for row in selected)
-    report.update({"decision": "recommend" if viable else "hold",
-                   "confidence": "medium" if same_type_season >= config["min_profiles"] else "low",
+    gross = optimal["saving_eur"]
+    worst = optimal["minimum_scenario_saving_eur"]
+    if reasons:
+        decision_reason = reasons[0]
+        justification = "Hay perfiles para estimar costes, pero no se alcanza el mínimo para proponer un cambio."
+    elif viable:
+        decision_reason = best["policy_reason"]
+        if economic:
+            justification = f"La opción propuesta ahorra al menos {best['minimum_scenario_saving_eur']:.6f} EUR en los escenarios simulados."
+        else:
+            justification = (f"La reducción evita al menos {best['minimum_avoided_grid_charge_kwh']:.3f} kWh "
+                             f"de carga desde la red. Su ahorro en el peor escenario es "
+                             f"{best['minimum_scenario_saving_eur']:.6f} EUR.")
+    elif optimal["policy_reason"] in {"BACKUP_RESERVE_NOT_MET", "FLAT_TARIFF_NO_GRID_ARBITRAGE",
+                                     "INSUFFICIENT_GRID_CHARGING_REDUCTION"}:
+        decision_reason = optimal["policy_reason"]
+        justification = {
+            "BACKUP_RESERVE_NOT_MET": "El óptimo no garantiza la reserva de respaldo configurada.",
+            "FLAT_TARIFF_NO_GRID_ARBITRAGE": "La tarifa uniforme no justifica subir un objetivo nocturno.",
+            "INSUFFICIENT_GRID_CHARGING_REDUCTION": "El óptimo no reduce suficientemente la carga desde la red.",
+        }[decision_reason]
+    elif gross <= 0:
+        decision_reason = "NO_ESTIMATED_SAVING"
+        justification = "Ninguna alternativa reduce el coste estimado frente al TOU actual."
+    elif gross <= threshold:
+        decision_reason = "BELOW_MINIMUM_SAVING"
+        justification = f"El ahorro bruto de {gross:.6f} EUR no supera el mínimo de {threshold:.6f} EUR."
+    else:
+        decision_reason = "INSUFFICIENT_ROBUST_SAVING"
+        justification = f"El ahorro del óptimo baja a {worst:.6f} EUR en el peor escenario. Ninguna opción supera el criterio de ahorro robusto."
+    decision = report["decision"] if reasons else "recommend" if viable else "hold"
+    report.update({"decision": decision, "decision_reason": decision_reason,
+                   "confidence": confidence,
                    "same_type_and_season_profiles": same_type_season,
-                   "recommended_soc": targets[0] if targets[0] == targets[1] else None,
-                   "estimated_midnight_soc": initial, "options": options,
+                   "recommended_soc": targets[0] if decision != "abstain" and targets[0] == targets[1] else None,
+                   "optimal_soc": optimal["targets"][0] if optimal["targets"][0] == optimal["targets"][1] else None,
+                   "optimal_targets": optimal["targets"], "optimal_cost_eur": optimal["cost_eur"],
+                   "gross_saving_eur": gross, "optimal_minimum_scenario_saving_eur": worst,
+                   "avoided_grid_charge_kwh": best["avoided_grid_charge_kwh"],
+                   "avoided_conversion_loss_kwh": best["avoided_conversion_loss_kwh"],
+                   "minimum_avoided_grid_charge_kwh": minimum_grid_reduction,
+                   "maximum_grid_reduction_cost_increase_eur": max_extra_cost,
+                   "backup_minimum_soc": backup_floor if backup_required else None,
+                   "estimated_midnight_soc": initial, "projected_precharge_battery_output_kwh": projected_discharge,
+                   "decision_horizon": {
+                       "start": datetime.fromtimestamp(stamps.start, MADRID).isoformat(),
+                       "end_exclusive": datetime.fromtimestamp(stamps.stop, MADRID).isoformat(),
+                       "hours": len(stamps)},
+                   "flat_import_price_eur_per_kwh": flat_price, "options": options,
                    "expected_cost_eur": best["cost_eur"], "estimated_saving_eur": best["saving_eur"],
                    "expected_battery_output_08_24_kwh": best["battery_output_08_24_kwh"],
-                   "explanation": (f"Consumo {sum(load):.2f} kWh y FV {sum(pv):.2f} kWh. "
-                                   f"Coste estimado {best['cost_eur']:.2f} EUR frente a "
-                                   f"{reference[0]['cost_eur']:.2f} EUR con el TOU actual. "
-                                   f"Ahorro mínimo simulado {best['minimum_scenario_saving_eur']:.2f} EUR.")})
+                   "explanation": (f"Coste óptimo {optimal['cost_eur']:.6f} EUR frente a "
+                                   f"{reference[0]['cost_eur']:.6f} EUR con el TOU actual. "
+                                   + justification + (" La tarifa plana no ofrece arbitraje horario. "
+                                   "La simulación contabiliza las pérdidas de la batería."
+                                   if flat_price is not None else ""))})
     return report
 
 
