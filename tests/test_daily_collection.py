@@ -399,12 +399,21 @@ class PrivateStoreTests(Offline):
 class WorkflowTests(unittest.TestCase):
     def test_workflow_has_no_public_writes_artifacts_or_untrusted_trigger(self):
         workflow = json.loads((Path(__file__).resolve().parents[1] / ".github/workflows/deye-daily.yml").read_text())
-        self.assertEqual(workflow["on"], {"workflow_dispatch": {}})
+        self.assertEqual(set(workflow["on"]), {"workflow_dispatch"})
+        self.assertFalse(workflow["on"]["workflow_dispatch"]["inputs"]["recommendation_dry_run"]["default"])
         self.assertFalse(workflow["concurrency"]["cancel-in-progress"])
         job = workflow["jobs"]["collect"]
         self.assertEqual(job["permissions"], {"contents": "read"})
         self.assertEqual(job["timeout-minutes"], 15)
-        self.assertEqual(job["steps"][-1]["env"]["DEYE_COLLECTION_MODE"], "combined")
+        collector = next(step for step in job["steps"] if "scripts/collect_deye_daily.py" in step.get("run", ""))
+        recommendation = job["steps"][-1]
+        self.assertEqual(collector["env"]["DEYE_COLLECTION_MODE"], "combined")
+        self.assertIn("!inputs.recommendation_dry_run", collector["if"])
+        self.assertIn("scripts/recommend_deye.py", recommendation["run"])
+        self.assertIn("DEYE_RECOMMENDATION_ENABLED", recommendation["if"])
+        self.assertEqual(set(recommendation["env"]),
+                         {"DEYE_RECOMMENDATION_ENABLED", "DEYE_RECOMMENDATION_DRY_RUN",
+                          "DEYE_DATA_REPOSITORY", "DEYE_DATA_TOKEN"})
         self.assertIn("DEYE_AUTOMATION_ENABLED", job["if"])
         self.assertIn("default_branch", job["if"])
         for step in job["steps"]:
@@ -414,7 +423,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(job["steps"][0]["with"]["persist-credentials"])
         app = next(step for step in job["steps"] if step.get("id") == "app-token")
         self.assertEqual(app["with"]["repositories"], "DeyeCloud-data")
-        self.assertEqual(app["with"]["permission-contents"], "write")
+        self.assertIn("inputs.recommendation_dry_run && 'read' || 'write'", app["with"]["permission-contents"])
 
 
 if __name__ == "__main__":

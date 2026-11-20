@@ -38,6 +38,10 @@ Los valores de las pruebas son ficticios y no proceden de las credenciales de Wi
 | `scripts/check_publication.py` | Revisión de archivos, índice e historial; nunca imprime valores detectados |
 | `tests/test_daily_collection.py` | Respuestas simuladas y persistencia en memoria; sin MCP ni red real |
 | `tests/test_publication.py` | Historial y secretos sintéticos en repositorios temporales de prueba |
+| `config/recommendation.example.json` | Valores de ejemplo y calendario público |
+| `docs/recommendation-readonly.md` | Flujo de cálculo, despliegue y ejemplo ficticio |
+| `scripts/recommend_deye.py` | Previsión y simulación sin telemetría o credenciales embebidas |
+| `tests/test_recommend_deye.py` | Previsión meteorológica e históricos simulados |
 
 ## Archivos del proyecto excluidos
 
@@ -45,6 +49,7 @@ Los valores de las pruebas son ficticios y no proceden de las credenciales de Wi
 |---|---|
 | `config/deye_local.proposed.toml` | Configuración y rutas reales de esta máquina; se conserva localmente |
 | `docs/deye-audit-readonly.json` | Datos reales de instalación, dispositivos y telemetría |
+| `config/recommendation.json` | Parámetros de la instalación para el cálculo privado |
 | `docs/deye-audit-report.md` | Informe de una instalación real, con identificación y hábitos energéticos |
 | `docs/deye-phase4b-results.json` | Resultados de consultas reales y metadatos identificativos |
 | `docs/deye-phase4b-followup.json` | Series temporales y dispositivos reales |

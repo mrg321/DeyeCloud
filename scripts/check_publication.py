@@ -17,6 +17,8 @@ PUBLIC_FILES = frozenset({
     "scripts/report_deye_history_quality.py", "scripts/deye_private_store.py", "scripts/collect_deye_daily.py",
     "scripts/check_publication.py", "scripts/Invoke-DeyeDaily.ps1",
     "scripts/deye_workbook.py",
+    "config/recommendation.example.json", "scripts/recommend_deye.py",
+    "tests/test_recommend_deye.py", "docs/recommendation-readonly.md",
     "tests/test_deye_local.py", "tests/test_deye_audit.py",
     "tests/test_deye_history.py", "tests/test_daily_collection.py", "tests/test_publication.py",
 })
