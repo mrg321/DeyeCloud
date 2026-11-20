@@ -202,6 +202,8 @@ class ApprovalTests(unittest.TestCase):
                 self.notify(store)
                 identity, event = store.event()
                 if elapsed.days:
+                    store.entries["approvals/proposals"] = {"type": "tree"}
+                    store.entries[f"approvals/proposals/{DAY}"] = {"type": "tree"}
                     self.assertTrue(approval.reconcile_expiry(store, NOW + elapsed))
                 else:
                     self.assertEqual(approval.decide(store, event, REVIEWERS, NOW + elapsed), "EXPIRED")

@@ -174,7 +174,7 @@ class ReadOnlyRecommendationTests(unittest.TestCase):
                 patch("builtins.print"):
             clock.now.return_value = midday
             self.assertEqual(recommend_deye.main([]), 0)
-            calculate.assert_called_once_with(store.return_value, midday, dry_run=False)
+            calculate.assert_called_once_with(store.return_value, midday, dry_run=False, recalculate=False)
             store.return_value.close.assert_called_once()
 
     def test_battery_capacity_names_and_legacy_config(self):
@@ -290,9 +290,15 @@ class ReadOnlyRecommendationTests(unittest.TestCase):
                                 for cell in rows.iter(f"{{{SHEET_NS}}}c")))
             self.assertIn(str(TARGET).encode(), workbook.read("xl/worksheets/sheet7.xml"))
         self.assertEqual(run(store, NOW, fetch=fetch), "ALREADY_RECORDED")
+        newer = NOW + timedelta(minutes=1)
+        self.assertEqual(run(store, newer, recalculate=True, dry_run=True, fetch=fetch), "DRY_RUN_COMPLETED")
+        self.assertEqual(store.entries[report_path]["forecast"]["queried_at"], NOW.isoformat())
+        self.assertEqual(run(store, newer, recalculate=True, fetch=fetch), "RECORDED_HOLD")
+        self.assertEqual(store.entries[report_path]["forecast"]["queried_at"], newer.isoformat())
+        self.assertEqual(set(store.publish.call_args.args[0]), {report_path, workbook_path})
         store.entries[workbook_path] = original
         self.assertEqual(run(store, NOW, fetch=fetch), "WORKBOOK_UPDATED")
-        fetch.assert_called_once()
+        self.assertEqual(fetch.call_count, 3)
         self.assertEqual(set(store.publish.call_args.args[0]), {workbook_path})
 
 

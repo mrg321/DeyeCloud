@@ -12,6 +12,7 @@ from deye_private_store import GitHubPrivateStore, canonical
 
 
 COMMAND = re.compile(r"/deye (approve|reject|cancel) (\d{4}-\d{2}-\d{2}) ([a-f0-9]{64})")
+PROPOSAL_PATH = re.compile(r"approvals/proposals/(\d{4}-\d{2}-\d{2})/([a-f0-9]{64})\.json")
 DECISIONS = {"approve": "approved", "reject": "rejected", "cancel": "cancelled"}
 UTC = timezone.utc
 
@@ -98,10 +99,10 @@ def reconcile_expiry(store, now):
     changes, issues = {}, []
     next_day = now.astimezone(MADRID).date() + timedelta(days=1)
     for path in sorted(store.entries):
-        if not path.startswith("approvals/proposals/"):
+        proposal_file = PROPOSAL_PATH.fullmatch(path)
+        if not proposal_file:
             continue
-        _, _, day, filename = path.split("/")
-        identity = filename.removesuffix(".json")
+        day, identity = proposal_file.groups()
         decision = decision_path(day, identity)
         if decision in store.entries or date.fromisoformat(day) > next_day:
             continue

@@ -473,12 +473,12 @@ def recommendation(target, now, weather, selected, snapshot, config):
     return report
 
 
-def run(store, now, *, dry_run=False, fetch=forecast):
+def run(store, now, *, dry_run=False, recalculate=False, fetch=forecast):
     today = now.astimezone(MADRID).date()
     target = today + timedelta(days=1)
     path = f"recommendations/{target}.json"
     workbook_path = f"reports/combined/{today}.xlsx"
-    if not dry_run and path in store.entries:
+    if not dry_run and not recalculate and path in store.entries:
         if workbook_path in store.entries:
             workbook = store.read_workbook(workbook_path)
             updated = add_recommendation_sheet(workbook, store.read(path))
@@ -490,7 +490,7 @@ def run(store, now, *, dry_run=False, fetch=forecast):
     snapshot = store.read(f"evening/{today}.json") or {}
     selected = history(store, target, config)
     try:
-        weather = fetch(target, config)
+        weather = dict(fetch(target, config))
     except (requests.RequestException, ValueError, KeyError, TypeError, IndexError):
         weather = {"source": "Open-Meteo", "confidence": "unavailable", "issues": ["INCOMPLETE_OR_FAILED_FORECAST"]}
     weather.update({"queried_at": now.astimezone(MADRID).isoformat(), "forecast_date": str(target)})
@@ -538,6 +538,7 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="Compute without publishing a private report.")
     args = parser.parse_args(argv)
     dry_run = args.dry_run or os.environ.get("DEYE_RECOMMENDATION_DRY_RUN") == "true"
+    recalculate = os.environ.get("DEYE_RECALCULATE_RECOMMENDATION") == "true"
     start = monotonic()
     now = datetime.now(MADRID)
     if not dry_run and os.environ.get("DEYE_RECOMMENDATION_ENABLED") != "true":
@@ -548,7 +549,7 @@ def main(argv=None):
         public_repository = os.environ.get("GITHUB_REPOSITORY")
         store = GitHubPrivateStore(repository, data_token, public_repository=public_repository)
         try:
-            result = run(store, now, dry_run=dry_run)
+            result = run(store, now, dry_run=dry_run, recalculate=recalculate)
             if not dry_run and os.environ.get("DEYE_APPROVAL_ENABLED") == "true":
                 dispatch_approval(repository, data_token, public_repository,
                                   str(now.date() + timedelta(days=1)))

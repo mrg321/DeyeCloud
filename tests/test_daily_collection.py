@@ -408,6 +408,9 @@ class WorkflowTests(unittest.TestCase):
         workflow = json.loads((Path(__file__).resolve().parents[1] / ".github/workflows/deye-daily.yml").read_text())
         self.assertEqual(set(workflow["on"]), {"workflow_dispatch"})
         self.assertFalse(workflow["on"]["workflow_dispatch"]["inputs"]["recommendation_dry_run"]["default"])
+        recalculate = workflow["on"]["workflow_dispatch"]["inputs"]["recalculate_recommendation"]
+        self.assertEqual(recalculate["type"], "boolean")
+        self.assertFalse(recalculate["default"])
         self.assertFalse(workflow["concurrency"]["cancel-in-progress"])
         job = workflow["jobs"]["collect"]
         self.assertEqual(job["permissions"], {"contents": "read"})
@@ -419,7 +422,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("scripts/recommend_deye.py", recommendation["run"])
         self.assertIn("DEYE_RECOMMENDATION_ENABLED", recommendation["if"])
         self.assertEqual(set(recommendation["env"]),
-                         {"DEYE_RECOMMENDATION_ENABLED", "DEYE_RECOMMENDATION_DRY_RUN", "DEYE_APPROVAL_ENABLED",
+                         {"DEYE_RECOMMENDATION_ENABLED", "DEYE_RECOMMENDATION_DRY_RUN",
+                          "DEYE_RECALCULATE_RECOMMENDATION", "DEYE_APPROVAL_ENABLED",
                           "DEYE_APPROVAL_WORKFLOW_TOKEN",
                           "DEYE_APPROVER_IDS", "DEYE_APPROVER_LOGINS", "DEYE_APPROVAL_CUTOFF",
                           "DEYE_DATA_REPOSITORY", "DEYE_DATA_TOKEN"})

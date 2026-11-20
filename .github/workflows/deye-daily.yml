@@ -7,6 +7,11 @@
           "description": "Test recommendation using existing private data without saving or connecting to Deye",
           "type": "boolean",
           "default": false
+        },
+        "recalculate_recommendation": {
+          "description": "Recalcular la recomendación y sustituir el informe guardado",
+          "type": "boolean",
+          "default": false
         }
       }
     }
@@ -77,6 +82,7 @@
           "env": {
             "DEYE_RECOMMENDATION_ENABLED": "${{ vars.DEYE_RECOMMENDATION_ENABLED }}",
             "DEYE_RECOMMENDATION_DRY_RUN": "${{ inputs.recommendation_dry_run }}",
+            "DEYE_RECALCULATE_RECOMMENDATION": "${{ inputs.recalculate_recommendation }}",
             "DEYE_APPROVAL_ENABLED": "${{ vars.DEYE_APPROVAL_ENABLED }}",
             "DEYE_APPROVER_IDS": "${{ vars.DEYE_APPROVER_IDS }}",
             "DEYE_APPROVER_LOGINS": "${{ vars.DEYE_APPROVER_LOGINS }}",

@@ -69,8 +69,13 @@ energía comprada para cargar la batería y el ahorro acumulado frente al TOU
 actual. El horizonte abarca el día objetivo completo en Madrid (23, 24 o 25
 horas según el cambio horario). Una cifra negativa indica un sobrecoste.
 
-Los reintentos conservan el primer informe, incluso si el informe documenta un fallo
-meteorológico. La concurrencia del workflow y el commit no forzado evitan
+Los reintentos conservan por defecto el primer informe, incluso si documenta
+un fallo meteorológico. Para sustituir el informe del día objetivo, abre
+**Run workflow** y marca **Recalcular la recomendación y sustituir el informe
+guardado** (`recalculate_recommendation`). Deja desmarcado el modo de prueba
+para publicar el JSON y actualizar el Excel. Si la aprobación está habilitada,
+el flujo privado invalida la propuesta anterior cuando cambia el informe.
+La concurrencia del workflow y el commit no forzado evitan
 publicaciones simultáneas. Si una ejecución falla y falta el informe, repite el
 workflow ese mismo día con los valores por defecto. Si aparece
 `ALREADY_RECORDED`, consulta el informe del día objetivo. Para desactivar la
