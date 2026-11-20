@@ -1,7 +1,15 @@
 {
   "name": "Deye daily private collection",
   "on": {
-    "workflow_dispatch": {}
+    "workflow_dispatch": {
+      "inputs": {
+        "recommendation_dry_run": {
+          "description": "Test recommendation using existing private data without saving or connecting to Deye",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    }
   },
   "permissions": {},
   "concurrency": {"group": "deye-private-daily", "cancel-in-progress": false},
@@ -27,6 +35,11 @@
         {"name": "Check public tree and Git history", "run": "python -B scripts/check_publication.py"},
         {"name": "Run offline collector tests", "run": "python -B -m unittest discover -s tests -p test_daily_collection.py -q"},
         {
+          "name": "Run offline recommendation tests",
+          "if": "${{ vars.DEYE_RECOMMENDATION_ENABLED == 'true' || inputs.recommendation_dry_run }}",
+          "run": "python -B -m unittest discover -s tests -p test_recommend_deye.py -q"
+        },
+        {
           "name": "Create private-repository installation token",
           "if": "${{ vars.DEYE_DATA_AUTH_MODE != 'pat' }}",
           "id": "app-token",
@@ -36,12 +49,13 @@
             "private-key": "${{ secrets.DEYE_DATA_APP_PRIVATE_KEY }}",
             "owner": "${{ vars.DEYE_DATA_OWNER || github.repository_owner }}",
             "repositories": "DeyeCloud-data",
-            "permission-contents": "write",
+            "permission-contents": "${{ inputs.recommendation_dry_run && 'read' || 'write' }}",
             "skip-token-revoke": false
           }
         },
         {
           "name": "Collect and atomically update private data",
+          "if": "${{ !inputs.recommendation_dry_run }}",
           "run": "python -B scripts/collect_deye_daily.py",
           "env": {
             "DEYE_AUTOMATION_ENABLED": "${{ vars.DEYE_AUTOMATION_ENABLED }}",
@@ -53,6 +67,18 @@
             "DEYE_DATA_REPOSITORY": "${{ vars.DEYE_DATA_OWNER || github.repository_owner }}/DeyeCloud-data",
             "DEYE_DATA_TOKEN": "${{ vars.DEYE_DATA_AUTH_MODE == 'pat' && secrets.DEYE_DATA_TOKEN || steps.app-token.outputs.token }}",
             "DEYE_COLLECTION_MODE": "combined"
+          }
+        },
+        {
+          "name": "Forecast and record a read-only recommendation",
+          "if": "${{ vars.DEYE_RECOMMENDATION_ENABLED == 'true' || inputs.recommendation_dry_run }}",
+          "timeout-minutes": 3,
+          "run": "python -B scripts/recommend_deye.py",
+          "env": {
+            "DEYE_RECOMMENDATION_ENABLED": "${{ vars.DEYE_RECOMMENDATION_ENABLED }}",
+            "DEYE_RECOMMENDATION_DRY_RUN": "${{ inputs.recommendation_dry_run }}",
+            "DEYE_DATA_REPOSITORY": "${{ vars.DEYE_DATA_OWNER || github.repository_owner }}/DeyeCloud-data",
+            "DEYE_DATA_TOKEN": "${{ vars.DEYE_DATA_AUTH_MODE == 'pat' && secrets.DEYE_DATA_TOKEN || steps.app-token.outputs.token }}"
           }
         }
       ]
