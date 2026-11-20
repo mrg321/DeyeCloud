@@ -407,7 +407,10 @@ def dispatch_approval(repository, data_token, public_repository, day):
     values = {name: os.environ.get(name, "") for name in ("DEYE_APPROVER_IDS", "DEYE_APPROVER_LOGINS")}
     if not workflow_token or not all(values.values()):
         raise ApprovalWorkflowMissing("APPROVAL_CONFIGURATION_MISSING")
-    values.update(DEYE_APPROVAL_ENABLED="true", DEYE_APPROVAL_CUTOFF=os.environ.get("DEYE_APPROVAL_CUTOFF") or "23:00")
+    values["DEYE_APPROVAL_ENABLED"] = "true"
+    cutoff = os.environ.get("DEYE_APPROVAL_CUTOFF")
+    if cutoff:
+        values["DEYE_APPROVAL_CUTOFF"] = cutoff
     template = (Path(__file__).resolve().parents[1] / "config/deye-approval.workflow.example.json").read_bytes()
     installer = GitHubPrivateStore(repository, workflow_token, public_repository=public_repository)
     try:

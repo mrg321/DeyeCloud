@@ -94,10 +94,19 @@ class ApprovalTests(unittest.TestCase):
             (ROOT / "config/deye-approval.workflow.example.json").read_bytes())
         installer.ensure_approval_variables.assert_called_once_with({
             "DEYE_APPROVER_IDS": "[123]", "DEYE_APPROVER_LOGINS": '{"123":"reviewer"}',
-            "DEYE_APPROVAL_ENABLED": "true", "DEYE_APPROVAL_CUTOFF": "23:00"})
+            "DEYE_APPROVAL_ENABLED": "true"})
         refreshed.dispatch_approval.assert_called_once_with(DAY)
         installer.close.assert_called_once()
         refreshed.close.assert_called_once()
+
+    def test_dispatch_copies_explicit_cutoff(self):
+        installer, refreshed = Mock(), Mock()
+        with patch.dict("os.environ", {"DEYE_APPROVAL_WORKFLOW_TOKEN": "installer",
+                                      "DEYE_APPROVER_IDS": "[123]", "DEYE_APPROVAL_CUTOFF": "22:30",
+                                      "DEYE_APPROVER_LOGINS": '{"123":"reviewer"}'}, clear=True), \
+                patch.object(recommendation, "GitHubPrivateStore", side_effect=[installer, refreshed]):
+            recommendation.dispatch_approval("test/DeyeCloud-data", "data", "test/DeyeCloud", DAY)
+        self.assertEqual(installer.ensure_approval_variables.call_args.args[0]["DEYE_APPROVAL_CUTOFF"], "22:30")
 
     def test_variable_sync_creates_only_missing_values(self):
         store = object.__new__(GitHubPrivateStore)

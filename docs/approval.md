@@ -43,7 +43,9 @@ las propuestas, las decisiones y su historial, con menos infraestructura.
    correspondencia entre login e ID antes de crear la notificación.
 3. Configura opcionalmente `DEYE_APPROVAL_CUTOFF` en **`DeyeCloud`**
    con formato `HH:MM`. Por defecto es `23:00` de Madrid del día anterior a la
-   fecha objetivo. El cambio de hora se resuelve al crear cada propuesta.
+   fecha objetivo. Si la variable está sin definir, el worker usa ese valor
+   internamente. Solo se copia al privado cuando se configura en `DeyeCloud`.
+   El cambio de hora se resuelve al crear cada propuesta.
 4. Establece `DEYE_APPROVAL_ENABLED=true` en **`DeyeCloud`** cuando quieras
    activar el flujo. El repositorio de código también necesita las variables
    de habilitación de la [Fase 1](recommendation-readonly.md). El token de datos
