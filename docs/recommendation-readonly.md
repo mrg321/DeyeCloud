@@ -100,6 +100,10 @@ para evaluarlo. El TOU actual se simula como referencia aunque supere el 80 %.
   entra en conflicto con esas protecciones, se bloquea el cambio. El informe identifica un óptimo
   bloqueado aunque pueda recomendar otra opción. La API disponible no
   acredita el mínimo del BMS ni expone todos los límites locales.
+
+  **Nota sobre el 30 %:** el valor configurado se basa en la lectura del TOU
+  del inversor y en la documentación pública de Dyness. Dyness no ha confirmado
+  ese valor específicamente para la versión de firmware del BMS instalada.
 - `reserve_soc` refleja la reserva operativa comprobada en los periodos
   diurnos y `minimum_allowed_soc` combina los límites de la política, el
   equipo y el respaldo. El SOC medido y el SOC proyectado al inicio de la
