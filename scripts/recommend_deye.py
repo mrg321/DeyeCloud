@@ -411,9 +411,6 @@ def main(argv=None):
     now = datetime.now(MADRID)
     if not dry_run and os.environ.get("DEYE_RECOMMENDATION_ENABLED") != "true":
         return 0
-    if not dry_run and now.hour not in (19, 20):
-        print("Recommendation skipped outside 19:00–21:00 Europe/Madrid.")
-        return 0
     try:
         store = GitHubPrivateStore(os.environ.get("DEYE_DATA_REPOSITORY"), os.environ.get("DEYE_DATA_TOKEN"),
                                    public_repository=os.environ.get("GITHUB_REPOSITORY"))

@@ -3,7 +3,7 @@ import unittest
 from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from deye_history_quality import MADRID, UTC
 from deye_workbook import SHEET_NS, collection_workbook
+import recommend_deye
 from recommend_deye import (ENERGY_FIELDS, TOU_TIMES, WEATHER_FIELDS, day_type, forecast,
                             history, hour_starts, load_profile, recommendation, run, settings)
 
@@ -62,6 +63,18 @@ class Store:
 
 
 class ReadOnlyRecommendationTests(unittest.TestCase):
+    def test_enabled_cli_runs_in_normal_mode_at_midday(self):
+        midday = NOW.replace(hour=12)
+        with patch.dict("os.environ", {"DEYE_RECOMMENDATION_ENABLED": "true"}, clear=True), \
+                patch.object(recommend_deye, "datetime") as clock, \
+                patch.object(recommend_deye, "GitHubPrivateStore") as store, \
+                patch.object(recommend_deye, "run", return_value="RECORDED_HOLD") as calculate, \
+                patch("builtins.print"):
+            clock.now.return_value = midday
+            self.assertEqual(recommend_deye.main([]), 0)
+            calculate.assert_called_once_with(store.return_value, midday, dry_run=False)
+            store.return_value.close.assert_called_once()
+
     def test_battery_capacity_names_and_legacy_config(self):
         legacy = settings()
         legacy["nominal_kwh"] = legacy.pop("battery_nominal_kwh")

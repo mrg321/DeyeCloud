@@ -45,9 +45,10 @@ el workspace, los artefactos ni los logs de Actions.
    `Contents: write` de `DeyeCloud-data` para guardar el informe.
    Consulta los nombres y el alcance en la [guía del colector](automation.md).
 
-La ventana de publicación es de 19:00 a 21:00, hora de Madrid, evaluada cuando
-empieza el paso de recomendación. Configura el disparo diario existente en
-cron-job.org a las 19:00 en `Europe/Madrid`, con el mismo
+La recomendación puede ejecutarse a cualquier hora y siempre apunta al día
+siguiente en `Europe/Madrid`. Para generar el informe manualmente, utiliza
+**Run workflow** con los valores por defecto. Para el disparo diario existente
+en cron-job.org, las 19:00 en Madrid siguen siendo una opción, con el mismo
 `POST /repos/{owner}/DeyeCloud/actions/workflows/deye-daily.yml/dispatches`.
 Usa la cabecera `Authorization: Bearer <TOKEN>`, `Accept: application/vnd.github+json`,
 `Content-Type: application/json` y el cuerpo `{"ref":"main"}` si `main` es
@@ -67,8 +68,8 @@ y las opciones simuladas.
 
 Los reintentos conservan el primer informe, incluso si el informe documenta un fallo
 meteorológico. La concurrencia del workflow y el commit no forzado evitan
-publicaciones simultáneas. Si falta el informe tras una ejecución fallida dentro
-de la ventana, utiliza **Run workflow** con los valores por defecto. Si aparece
+publicaciones simultáneas. Si una ejecución falla y falta el informe, repite el
+workflow ese mismo día con los valores por defecto. Si aparece
 `ALREADY_RECORDED`, consulta el informe del día objetivo. Para desactivar la
 recomendación, elimina o deshabilita `DEYE_RECOMMENDATION_ENABLED`.
 
