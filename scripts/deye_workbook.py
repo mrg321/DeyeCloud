@@ -94,6 +94,8 @@ def add_recommendation_sheet(workbook, report):
         ("Minimum saving required (EUR)", result.get("minimum_saving_eur")),
         ("Decision reason", result.get("decision_reason")),
         ("Optimization policy", result.get("optimization_policy")),
+        ("Operating reserve SOC (%)", result.get("reserve_soc")),
+        ("Minimum allowed night SOC (%)", result.get("minimum_allowed_soc")),
         ("Avoided grid-to-battery energy (kWh)", result.get("avoided_grid_charge_kwh")),
         ("Avoided battery conversion losses (kWh)", result.get("avoided_conversion_loss_kwh")),
     ]
@@ -107,6 +109,8 @@ def add_recommendation_sheet(workbook, report):
         if option["targets"] == result.get("current_targets"):
             targets += " (current TOU)"
         rows.extend([(f"{targets} — Grid-to-battery energy (kWh)", option.get("grid_to_battery_kwh")),
+                     (f"{targets} — Total grid import (kWh)", option.get("grid_import_kwh")),
+                     (f"{targets} — Final SOC (%)", option.get("end_soc")),
                      (f"{targets} — Cumulative saving vs current TOU (EUR)",
                       option.get("cumulative_saving_eur", option.get("saving_eur")))])
     sheet = worksheet(rows).encode("utf-8")

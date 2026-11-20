@@ -83,6 +83,32 @@ recomendación, elimina o deshabilita `DEYE_RECOMMENDATION_ENABLED`.
 
 ## Previsión y cálculo económico
 
+Los candidatos nocturnos predeterminados son `[30, 40, 50, 60, 70, 80]`.
+Si la configuración privada ya define `targets`, añade el 30 a esa lista
+para evaluarlo. El TOU actual se simula como referencia aunque supere el 80 %.
+
+- `minimum_night_soc` fija el mínimo configurable para proponer un objetivo
+  nocturno. Su valor inicial de **30 %** permite evaluar la reserva operativa
+  como objetivo de carga. Los candidatos por debajo de la reserva quedan fuera
+  y los periodos diurnos conservan su reserva.
+- `verified_device_minimum_soc` empieza en `null`. Solo se configura tras
+  confirmar el mínimo admitido por el TOU, el inversor y el BMS de la
+  instalación, incluidos los límites de reinicio y respaldo que correspondan.
+  Para objetivos inferiores al mínimo anterior de 40 %, también se exige
+  una lectura actual y coherente de `Low` y `Shutdown`. El objetivo debe
+  quedar por encima de ambas protecciones. Si la reserva leída en el TOU
+  entra en conflicto con esas protecciones, se bloquea el cambio. El informe identifica un óptimo
+  bloqueado aunque pueda recomendar otra opción. La API disponible no
+  acredita el mínimo del BMS ni expone todos los límites locales.
+- `reserve_soc` refleja la reserva operativa comprobada en los periodos
+  diurnos y `minimum_allowed_soc` combina los límites de la política, el
+  equipo y el respaldo. El SOC medido y el SOC proyectado al inicio de la
+  carga se muestran por separado. El objetivo nocturno permite cargar si el
+  SOC está por debajo durante una franja con carga desde red. Si está por
+  encima, la simulación solo descarga para cubrir demanda. Este modelo
+  horario no valida el comportamiento exacto del firmware instalado.
+  [Manual Deye SUN-SG05LP1-EU](https://www.deyeinverter.com/deyeinverter/2024/02/03/instructions_sun-3.6-8k-sg05lp1-eu_240203_en.pdf).
+
 - **Open-Meteo** aporta una única previsión diaria con series horarias. La
   radiación sobre el plano inclinado y el sol efectivo corresponden a la hora
   anterior al sello. La nubosidad se toma al comienzo del intervalo. La duración

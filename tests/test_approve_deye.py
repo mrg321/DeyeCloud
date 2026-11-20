@@ -64,6 +64,19 @@ class Store:
 
 
 class ApprovalTests(unittest.TestCase):
+    def test_approval_proposal_for_30_contains_only_the_two_night_targets(self):
+        store = Store()
+        result = store.entries[f"recommendations/{DAY}.json"]["recommendation"]
+        result.update(recommended_soc=30, current_targets=[100, 100], reserve_soc=30,
+                      minimum_allowed_soc=30, lower_targets_verified=True)
+        self.assertEqual(approval.notify(store, DAY, "23:00", NOW, REVIEWERS), "NOTIFIED")
+        identity, event = store.event()
+        payload = store.entries[approval.proposal_path(DAY, identity)]["payload"]
+        self.assertEqual(payload["proposed_targets"], [30, 30])
+        self.assertEqual(payload["slots_madrid"], ["00:00–05:00", "05:00–08:00"])
+        self.assertNotIn(approval.decision_path(DAY, identity), store.entries)
+        self.assertEqual(approval.decide(store, event, REVIEWERS, NOW), "APPROVED")
+
     def test_dispatch_requires_private_workflow_file(self):
         store = object.__new__(GitHubPrivateStore)
         store.verify_private = Mock()

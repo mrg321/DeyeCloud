@@ -77,6 +77,9 @@ def issue_text(payload, identity, report):
         body.insert(12, f"Mejor SOC por coste: {value(result, 'optimal_soc', ' %')}. "
                     f"Ahorro bruto: {result['gross_saving_eur']:.6f} EUR. "
                     f"Mínimo exigido: {result['minimum_saving_eur']:.6f} EUR.")
+    if "lower_targets_verified" in result:
+        body.insert(12, f"**Reserva operativa:** {value(result, 'reserve_soc', ' %')} · "
+                    f"**Mínimo nocturno permitido:** {value(result, 'minimum_allowed_soc', ' %')}.")
     if payload["actionable"]:
         body += ["Comenta exactamente uno de estos comandos:", "~~~text",
                  *(f"/deye {command} {payload['date']} {identity}" for command in DECISIONS), "~~~"]

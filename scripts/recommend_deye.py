@@ -22,6 +22,7 @@ WEATHER_FIELDS = {"global_tilted_irradiance": "W/m²", "sunshine_duration": "s",
 TOU_TIMES = ("0000", "0500", "0800", "1300", "1700", "2100")
 ENERGY_FIELDS = ("Consumption", "Production", "ElectricityPurchasing", "GridFeed-in",
                  "ChargingCapacity", "DischargingCapacity")
+PREVIOUS_MINIMUM_NIGHT_SOC = 40
 
 
 def settings(override=None, *, require_installation=False):
@@ -61,7 +62,10 @@ def settings(override=None, *, require_installation=False):
         raise ValueError("INVALID_RECOMMENDATION_SETTING")
     targets, prices = config["targets"], config["prices"]
     if (config["battery_usable_kwh"] > config["battery_nominal_kwh"] or type(targets) is not list or not targets
-            or not all(type(x) is int and config["reserve_soc"] < x <= 100 for x in targets)
+            or not all(type(x) is int and 0 <= x <= 100 for x in targets)
+            or not bounded(config["minimum_night_soc"], 0, 100)
+            or (config["verified_device_minimum_soc"] is not None
+                and not bounded(config["verified_device_minimum_soc"], 0, 100))
             or targets != sorted(set(targets)) or config["fallback"] not in ("hold", "abstain")
             or set(prices) != {"valley", "flat", "peak"}
             or not all(bounded(value, 0, 10) for value in prices.values())
@@ -257,6 +261,23 @@ def import_price(hour, kind, config):
     return config["prices"][period]
 
 
+def night_soc_limits(snapshot, config):
+    """Use live protections as additional bounds, with explicit TOU/BMS confirmation for lower targets."""
+    battery = snapshot.get("parameters", {}).get("deye_read_battery_settings") or {}
+    data = battery.get("data") or {}
+    shutdown, low = data.get("battShutDownCapacity"), data.get("battLowCapacity")
+    available = battery.get("status") == "available"
+    valid = (available and type(shutdown) is int and type(low) is int and 0 <= shutdown <= low < 100)
+    verified = config["verified_device_minimum_soc"]
+    minimum = max(config["reserve_soc"], config["minimum_night_soc"], verified or 0)
+    if valid:
+        minimum = max(minimum, low + 1)
+    if not valid or verified is None:
+        minimum = max(minimum, PREVIOUS_MINIMUM_NIGHT_SOC)
+    conflict = available and (not valid or low >= config["reserve_soc"])
+    return minimum, valid and not conflict and verified is not None, conflict
+
+
 def simulate(hours, load, pv, initial, targets, kind, config):
     capacity = config["battery_usable_kwh"]
     battery = initial * capacity / 100
@@ -305,6 +326,11 @@ def simulate(hours, load, pv, initial, targets, kind, config):
 
 def recommendation(target, now, weather, selected, snapshot, config):
     soc, baseline, soc_time = evening_state(snapshot, now, config)
+    night_minimum, lower_targets_verified, invalid_protection = night_soc_limits(snapshot, config)
+    backup_required = bool(config["backup_reserve_soc"] or config["backup_autonomy_kwh"])
+    backup_floor = max(config["backup_reserve_soc"], config["reserve_soc"] +
+                       100 * config["backup_autonomy_kwh"] /
+                       (config["battery_usable_kwh"] * config["discharge_efficiency"]))
     kind = day_type(target, config)
     stamps = hour_starts(target)
     hours = [datetime.fromtimestamp(stamp, MADRID).hour for stamp in stamps]
@@ -325,11 +351,16 @@ def recommendation(target, now, weather, selected, snapshot, config):
         reasons.append("TOU_UNAVAILABLE_OR_UNEXPECTED")
     if kind is None:
         reasons.append("MISSING_HOLIDAY_CALENDAR")
+    if invalid_protection:
+        reasons.append("INCONSISTENT_BATTERY_PROTECTION")
     report = {"day_type": kind, "current_soc": soc, "soc_measured_at": soc_time,
               "current_targets": baseline, "recommended_soc": None, "optimal_soc": None,
               "optimal_targets": None, "optimal_cost_eur": None, "gross_saving_eur": None,
               "optimal_minimum_scenario_saving_eur": None, "minimum_saving_eur": config["minimum_saving_eur"],
               "decision_reason": reasons[0] if reasons else None,
+              "reserve_soc": config["reserve_soc"] if baseline is not None else None,
+              "minimum_allowed_soc": max(night_minimum, backup_floor) if baseline is not None and not invalid_protection else None,
+              "lower_targets_verified": baseline is not None and lower_targets_verified,
               "optimization_policy": "COST_THEN_AVOID_GRID_CHARGING",
               "avoided_grid_charge_kwh": None, "avoided_conversion_loss_kwh": None,
               "decision": "hold" if baseline and config["fallback"] == "hold" else "abstain",
@@ -359,7 +390,8 @@ def recommendation(target, now, weather, selected, snapshot, config):
                              1 + pv_sign * config["pv_uncertainty"])
                             for load_sign in (-1, 1) for pv_sign in (-1, 1)]
     outcomes = {}
-    for setting in dict.fromkeys([tuple(baseline)] + [(x, x) for x in config["targets"]]):
+    candidates = [(x, x) for x in config["targets"] if x >= config["reserve_soc"]]
+    for setting in dict.fromkeys([tuple(baseline)] + candidates):
         outcomes[setting] = [simulate(hours, [x * lf for x in load], [x * pf for x in pv],
                                       initial, setting, kind, config) for lf, pf in scenarios]
     reference = outcomes[tuple(baseline)]
@@ -370,10 +402,6 @@ def recommendation(target, now, weather, selected, snapshot, config):
                   and weather.get("confidence") != "low" else "low")
     prices = {import_price(hour, kind, config) for hour in hours}
     flat_price = next(iter(prices)) if len(prices) == 1 else None
-    backup_required = bool(config["backup_reserve_soc"] or config["backup_autonomy_kwh"])
-    backup_floor = max(config["backup_reserve_soc"], config["reserve_soc"] +
-                       100 * config["backup_autonomy_kwh"] /
-                       (config["battery_usable_kwh"] * config["discharge_efficiency"]))
     minimum_grid_reduction = config["minimum_avoided_grid_charge_kwh"]
     max_extra_cost = config["maximum_grid_reduction_cost_increase_eur"] if confidence != "low" else 0
     threshold = config["minimum_saving_eur"]
@@ -394,6 +422,9 @@ def recommendation(target, now, weather, selected, snapshot, config):
         if setting != tuple(baseline) and not reasons:
             if not backup_ok:
                 policy_reason = "BACKUP_RESERVE_NOT_MET"
+            elif min(setting) < night_minimum:
+                policy_reason = ("LOW_SOC_LIMITS_UNVERIFIED" if not lower_targets_verified
+                                 and min(setting) < PREVIOUS_MINIMUM_NIGHT_SOC else "MINIMUM_SOC_NOT_MET")
             elif increases and flat_price is not None:
                 policy_reason = "FLAT_TARIFF_NO_GRID_ARBITRAGE"
             elif reduces and min(avoided) + 1e-9 < minimum_grid_reduction:
@@ -422,18 +453,25 @@ def recommendation(target, now, weather, selected, snapshot, config):
     elif viable:
         decision_reason = best["policy_reason"]
         if economic:
-            justification = f"La opción propuesta ahorra al menos {best['minimum_scenario_saving_eur']:.6f} EUR en los escenarios simulados."
+            direction = ("El aumento aprovecha la diferencia entre tarifas."
+                         if any(target > current for target, current in zip(targets, baseline))
+                         else "La reducción se justifica por su ahorro económico.")
+            justification = (f"{direction} La opción propuesta ahorra al menos "
+                             f"{best['minimum_scenario_saving_eur']:.6f} EUR en los escenarios simulados.")
         else:
             justification = (f"La reducción evita al menos {best['minimum_avoided_grid_charge_kwh']:.3f} kWh "
                              f"de carga desde la red. Su ahorro en el peor escenario es "
                              f"{best['minimum_scenario_saving_eur']:.6f} EUR.")
     elif optimal["policy_reason"] in {"BACKUP_RESERVE_NOT_MET", "FLAT_TARIFF_NO_GRID_ARBITRAGE",
-                                     "INSUFFICIENT_GRID_CHARGING_REDUCTION"}:
+                                     "INSUFFICIENT_GRID_CHARGING_REDUCTION", "LOW_SOC_LIMITS_UNVERIFIED",
+                                     "MINIMUM_SOC_NOT_MET"}:
         decision_reason = optimal["policy_reason"]
         justification = {
             "BACKUP_RESERVE_NOT_MET": "El óptimo no garantiza la reserva de respaldo configurada.",
             "FLAT_TARIFF_NO_GRID_ARBITRAGE": "La tarifa uniforme no justifica subir un objetivo nocturno.",
             "INSUFFICIENT_GRID_CHARGING_REDUCTION": "El óptimo no reduce suficientemente la carga desde la red.",
+            "LOW_SOC_LIMITS_UNVERIFIED": "El óptimo queda bloqueado porque falta verificar el mínimo TOU/BMS.",
+            "MINIMUM_SOC_NOT_MET": "El óptimo queda por debajo del SOC mínimo permitido.",
         }[decision_reason]
     elif gross <= 0:
         decision_reason = "NO_ESTIMATED_SAVING"
@@ -470,6 +508,9 @@ def recommendation(target, now, weather, selected, snapshot, config):
                                    + justification + (" La tarifa plana no ofrece arbitraje horario. "
                                    "La simulación contabiliza las pérdidas de la batería."
                                    if flat_price is not None else ""))})
+    if (viable and optimal is not best and optimal["policy_reason"] in
+            {"BACKUP_RESERVE_NOT_MET", "LOW_SOC_LIMITS_UNVERIFIED", "MINIMUM_SOC_NOT_MET"}):
+        report["explanation"] += " El óptimo económico queda bloqueado por el límite de seguridad o su verificación."
     return report
 
 
