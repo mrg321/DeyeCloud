@@ -136,6 +136,13 @@ class CollectorTests(Offline):
         with ZipFile(io.BytesIO(store.files[f"reports/combined/{today}.xlsx"])) as workbook:
             self.assertIn(b"Daily energy", workbook.read("xl/workbook.xml"))
             self.assertIn(today.encode(), workbook.read("xl/worksheets/sheet1.xml"))
+        store.files["recommendations/2026-10-27.json"] = {
+            "date": "2026-10-27", "forecast": {"source": "Open-Meteo"},
+            "recommendation": {"decision": "hold", "confidence": "low"}}
+        self.assertTrue(collector.collect(client, store, now=now, mode="combined"))
+        with ZipFile(io.BytesIO(store.files[f"reports/combined/{today}.xlsx"])) as workbook:
+            self.assertIn(b"Recommendation", workbook.read("xl/workbook.xml"))
+            self.assertIn(b"2026-10-27", workbook.read("xl/worksheets/sheet7.xml"))
 
         store, client = MemoryStore(), FakeDeye()
         store.files["config/installation.json"]["installation_start"] = today

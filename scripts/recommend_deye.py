@@ -13,6 +13,7 @@ import requests
 
 from deye_history_quality import MADRID, day_bounds, numeric, sample_time
 from deye_private_store import GitHubPrivateStore, canonical
+from deye_workbook import add_recommendation_sheet
 
 
 UTC = timezone.utc
@@ -370,7 +371,14 @@ def run(store, now, *, dry_run=False, fetch=forecast):
     today = now.astimezone(MADRID).date()
     target = today + timedelta(days=1)
     path = f"recommendations/{target}.json"
+    workbook_path = f"reports/combined/{today}.xlsx"
     if not dry_run and path in store.entries:
+        if workbook_path in store.entries:
+            workbook = store.read_workbook(workbook_path)
+            updated = add_recommendation_sheet(workbook, store.read(path))
+            if updated != workbook:
+                store.publish({workbook_path: updated})
+                return "WORKBOOK_UPDATED"
         return "ALREADY_RECORDED"
     config = settings(store.read("config/recommendation.json"), require_installation=True)
     snapshot = store.read(f"evening/{today}.json") or {}
@@ -386,7 +394,11 @@ def run(store, now, *, dry_run=False, fetch=forecast):
               "recommendation": recommendation(target, now, weather, selected, snapshot, config)}
     if dry_run:
         return "DRY_RUN_COMPLETED"
-    store.publish({path: result})
+    changes = {path: result}
+    if workbook_path in store.entries:
+        workbook = store.read_workbook(workbook_path)
+        changes[workbook_path] = add_recommendation_sheet(workbook, result)
+    store.publish(changes)
     return "RECORDED_" + result["recommendation"]["decision"].upper()
 
 

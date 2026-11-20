@@ -1,14 +1,18 @@
 import sys
 import unittest
 from datetime import date, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import Mock
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from deye_history_quality import MADRID, UTC
+from deye_workbook import SHEET_NS, collection_workbook
 from recommend_deye import (ENERGY_FIELDS, TOU_TIMES, WEATHER_FIELDS, day_type, forecast,
                             history, hour_starts, load_profile, recommendation, run, settings)
 
@@ -52,6 +56,9 @@ class Store:
 
     def read(self, path):
         return self.entries.get(path)
+
+    def read_workbook(self, path):
+        return self.entries[path]
 
 
 class ReadOnlyRecommendationTests(unittest.TestCase):
@@ -148,6 +155,30 @@ class ReadOnlyRecommendationTests(unittest.TestCase):
         self.assertEqual(run(store, NOW, fetch=fetch), "ALREADY_RECORDED")
         self.assertEqual(fetch.call_count, 2)
         store.publish.assert_called_once()
+
+    def test_combined_workbook_and_recommendation_are_published_together(self):
+        workbook_path = f"reports/combined/{NOW.date()}.xlsx"
+        report_path = f"recommendations/{TARGET}.json"
+        original = collection_workbook({}, "combined", str(NOW.date()))
+        store = Store({"config/recommendation.json": settings(),
+                       f"evening/{NOW.date()}.json": snapshot(), workbook_path: original})
+        fetch = Mock(return_value=solar(4))
+        self.assertEqual(run(store, NOW, fetch=fetch), "RECORDED_HOLD")
+        self.assertEqual(set(store.publish.call_args.args[0]), {report_path, workbook_path})
+        with ZipFile(BytesIO(store.entries[workbook_path])) as workbook, ZipFile(BytesIO(original)) as base:
+            self.assertIsNone(workbook.testzip())
+            self.assertEqual(workbook.read("xl/worksheets/sheet1.xml"), base.read("xl/worksheets/sheet1.xml"))
+            sheets = ElementTree.fromstring(workbook.read("xl/workbook.xml"))
+            self.assertEqual(sheets.findall(f".//{{{SHEET_NS}}}sheet")[-1].get("name"), "Recommendation")
+            rows = ElementTree.fromstring(workbook.read("xl/worksheets/sheet7.xml"))
+            self.assertTrue(any(cell.get("r") == "B18" and cell.findtext(f"{{{SHEET_NS}}}v") == "32"
+                                for cell in rows.iter(f"{{{SHEET_NS}}}c")))
+            self.assertIn(str(TARGET).encode(), workbook.read("xl/worksheets/sheet7.xml"))
+        self.assertEqual(run(store, NOW, fetch=fetch), "ALREADY_RECORDED")
+        store.entries[workbook_path] = original
+        self.assertEqual(run(store, NOW, fetch=fetch), "WORKBOOK_UPDATED")
+        fetch.assert_called_once()
+        self.assertEqual(set(store.publish.call_args.args[0]), {workbook_path})
 
 
 if __name__ == "__main__":

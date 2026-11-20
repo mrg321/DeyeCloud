@@ -58,6 +58,67 @@ def worksheet(rows):
             f'<autoFilter ref="A1:{last_column}{len(rows)}"/></worksheet>')
 
 
+def add_recommendation_sheet(workbook, report):
+    """Add or refresh the recommendation in a collector-generated XLSX."""
+    forecast, result = report["forecast"], report["recommendation"]
+    targets = result.get("current_targets") or [None, None]
+    rows = [
+        ("Field", "Value"),
+        ("Target date (Madrid)", report["date"]),
+        ("Decision", result["decision"]),
+        ("Confidence", result["confidence"]),
+        ("Current battery SOC (%)", result.get("current_soc")),
+        ("Current target 00:00–05:00 (%)", targets[0]),
+        ("Current target 05:00–08:00 (%)", targets[1]),
+        ("Recommended battery SOC (%)", result.get("recommended_soc")),
+        ("Nominal battery capacity (kWh)", result.get("battery_nominal_kwh", result.get("nominal_capacity_kwh"))),
+        ("Estimated usable battery capacity (kWh)", result.get("battery_usable_kwh", result.get("usable_capacity_kwh"))),
+        ("Forecast source", forecast.get("source")),
+        ("Forecast queried at", forecast.get("queried_at")),
+        ("Forecast confidence", forecast.get("confidence")),
+        ("Astronomical daylight (h)", forecast.get("daylight_hours")),
+        ("Effective sunshine (h)", forecast.get("sunshine_hours")),
+        ("Mean cloud cover (%)", forecast.get("cloud_cover_mean_pct")),
+        ("Solar irradiation (kWh/m²)", forecast.get("irradiation_kwh_m2")),
+        ("Expected PV production (kWh)", forecast.get("pv_kwh")),
+        ("Expected household consumption (kWh)", result.get("expected_load_kwh")),
+        ("Expected battery output 08:00–24:00 (kWh)", result.get("expected_battery_output_08_24_kwh")),
+        ("Expected cost (EUR)", result.get("expected_cost_eur")),
+        ("Estimated savings (EUR)", result.get("estimated_saving_eur")),
+        ("Explanation", result.get("explanation")),
+        ("Forecast issues", ", ".join(forecast.get("issues", []))),
+        ("Recommendation issues", ", ".join(result.get("issues", []))),
+    ]
+    sheet = worksheet(rows).encode("utf-8")
+    output = BytesIO()
+    with ZipFile(BytesIO(workbook)) as source:
+        book = source.read("xl/workbook.xml").decode("utf-8")
+        existing = re.search(r'<sheet name="Recommendation" sheetId="(\d+)"', book)
+        index = int(existing[1]) if existing else book.count("<sheet ") + 1
+        part = f"worksheets/sheet{index}.xml"
+        updates = {f"xl/{part}": sheet}
+        if existing:
+            if source.read(f"xl/{part}") == sheet:
+                return workbook
+        else:
+            updates["xl/workbook.xml"] = book.replace(
+                "</sheets>", f'<sheet name="Recommendation" sheetId="{index}" r:id="rId{index}"/></sheets>')
+            paths = ("xl/_rels/workbook.xml.rels", "[Content_Types].xml")
+            relationships, types = (source.read(path).decode("utf-8") for path in paths)
+            updates[paths[0]] = relationships.replace(
+                "</Relationships>",
+                f'<Relationship Id="rId{index}" Type="{OFFICE_REL}/worksheet" Target="{part}"/></Relationships>')
+            updates[paths[1]] = types.replace(
+                "</Types>", f'<Override PartName="/xl/{part}" ContentType="{CONTENT_TYPE}.worksheet+xml"/></Types>')
+        with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+            for name in source.namelist():
+                if name not in updates:
+                    archive.writestr(ZipInfo(name), source.read(name), compress_type=ZIP_DEFLATED)
+            for name, content in updates.items():
+                archive.writestr(ZipInfo(name), content, compress_type=ZIP_DEFLATED)
+    return output.getvalue()
+
+
 def collection_workbook(changes, mode, day):
     """Build deterministic XLSX bytes from the same validated JSON being published."""
     summary = [("Field", "Value"), ("Mode", mode), ("Madrid date", day)]

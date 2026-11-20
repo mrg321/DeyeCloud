@@ -12,12 +12,12 @@ if __package__:
     from .deye_client import DeyeClient, DeyeClientError
     from .deye_history_quality import MADRID, day_bounds, numeric, sample_time, analyze_samples
     from .deye_private_store import GitHubPrivateStore, canonical
-    from .deye_workbook import collection_workbook
+    from .deye_workbook import add_recommendation_sheet, collection_workbook
 else:
     from deye_client import DeyeClient, DeyeClientError
     from deye_history_quality import MADRID, day_bounds, numeric, sample_time, analyze_samples
     from deye_private_store import GitHubPrivateStore, canonical
-    from deye_workbook import collection_workbook
+    from deye_workbook import add_recommendation_sheet, collection_workbook
 
 
 class CollectionError(RuntimeError):
@@ -309,7 +309,13 @@ def collect(client, store, *, now=None, end_date=None, originals=None, mode="clo
             "queried_dates": days, "original_hashes": sorted(source_hashes),
             "backfill": end_date is not None, "timezone": "Europe/Madrid"}
     report_date = today or days[-1]
-    changes[f"reports/{mode}/{report_date}.xlsx"] = collection_workbook(changes, mode, report_date)
+    workbook = collection_workbook(changes, mode, report_date)
+    if mode == "combined":
+        target = date.fromisoformat(report_date) + timedelta(days=1)
+        report = store.read(f"recommendations/{target}.json")
+        if report is not None:
+            workbook = add_recommendation_sheet(workbook, report)
+    changes[f"reports/{mode}/{report_date}.xlsx"] = workbook
     return store.publish(changes)
 
 

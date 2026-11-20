@@ -58,7 +58,14 @@ y el job y su duración en Actions. Un despacho aceptado solo confirma la recepc
 de la solicitud. [Configuración de cron-job.org](https://docs.cron-job.org/rest-api.html).
 
 Cada fecha objetivo tiene un único `recommendations/YYYY-MM-DD.json`. Los
-reintentos conservan el primer informe, incluso si el informe documenta un fallo
+resultados también aparecen en la pestaña **Recommendation** del informe
+`reports/combined/YYYY-MM-DD.xlsx`, cuyo nombre usa la fecha de recogida en
+Madrid. La pestaña indica la fecha objetivo del día siguiente y resume la
+previsión, el SOC observado, los objetivos de carga, el consumo, el coste,
+el ahorro y el motivo de la decisión. El JSON conserva el detalle horario
+y las opciones simuladas.
+
+Los reintentos conservan el primer informe, incluso si el informe documenta un fallo
 meteorológico. La concurrencia del workflow y el commit no forzado evitan
 publicaciones simultáneas. Si falta el informe tras una ejecución fallida dentro
 de la ventana, utiliza **Run workflow** con los valores por defecto. Si aparece

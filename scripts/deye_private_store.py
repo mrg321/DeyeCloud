@@ -90,6 +90,24 @@ class GitHubPrivateStore:
             raise PrivateStoreError("PRIVATE_PATH_INVALID")
         if path in self._cache:
             return self._cache[path]
+        content = self._read_blob(path)
+        if content is None:
+            return None
+        try:
+            result = json.loads(content)
+            if type(result) is not dict:
+                raise ValueError()
+        except (ValueError, UnicodeError):
+            raise PrivateStoreError("PRIVATE_FILE_INVALID") from None
+        self._cache[path] = result
+        return result
+
+    def read_workbook(self, path):
+        if not valid_workbook_path(path):
+            raise PrivateStoreError("PRIVATE_PATH_INVALID")
+        return self._read_blob(path)
+
+    def _read_blob(self, path):
         entry = self.entries.get(path)
         if entry is None:
             return None
@@ -99,11 +117,7 @@ class GitHubPrivateStore:
             blob = self._request("GET", "/git/blobs/" + entry["sha"])
             if blob["encoding"] != "base64":
                 raise ValueError()
-            result = json.loads(base64.b64decode(blob["content"], validate=False))
-            if type(result) is not dict:
-                raise ValueError()
-            self._cache[path] = result
-            return result
+            return base64.b64decode(blob["content"], validate=False)
         except Exception:
             raise PrivateStoreError("PRIVATE_FILE_INVALID") from None
 
