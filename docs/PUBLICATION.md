@@ -42,6 +42,10 @@ Los valores de las pruebas son ficticios y no proceden de las credenciales de Wi
 | `docs/recommendation-readonly.md` | Flujo de cálculo, despliegue y ejemplo ficticio |
 | `scripts/recommend_deye.py` | Previsión y simulación sin telemetría o credenciales embebidas |
 | `tests/test_recommend_deye.py` | Previsión meteorológica e históricos simulados |
+| `config/deye-approval.workflow.example.json` | Plantilla para instalar el workflow en el repositorio privado |
+| `scripts/approve_deye.py` | Notificación y registro de decisiones sin credenciales Deye |
+| `tests/test_approve_deye.py` | Eventos de GitHub simulados y pruebas de seguridad de aprobación |
+| `docs/approval.md` | Configuración y uso con identificadores de ejemplo |
 
 ## Archivos del proyecto excluidos
 

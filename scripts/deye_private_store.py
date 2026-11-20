@@ -8,8 +8,15 @@ import re
 import requests
 
 
+APPROVAL_WORKFLOW_PATH = ".github/workflows/deye-approval.yml"
+
+
 class PrivateStoreError(RuntimeError):
     """Only fixed codes, never response messages or exceptions."""
+
+
+class ApprovalWorkflowMissing(PrivateStoreError):
+    """The private branch snapshot lacks an executable workflow file."""
 
 
 def canonical(value):
@@ -24,7 +31,8 @@ def blob_sha(content):
 def valid_data_path(path):
     return bool(re.fullmatch(
         r"(?:config/(?:installation|recommendation)\.json|state/collection\.json|parameters/latest\.json|"
-        r"originals/[a-f0-9]{64}\.json|(?:daily|intraday|consumption|evening|recommendations)/\d{4}-\d{2}-\d{2}\.json)", path))
+        r"originals/[a-f0-9]{64}\.json|(?:daily|intraday|consumption|evening|recommendations|approvals/current)/\d{4}-\d{2}-\d{2}\.json|"
+        r"approvals/(?:proposals|decisions)/\d{4}-\d{2}-\d{2}/[a-f0-9]{64}\.json)", path))
 
 
 def valid_workbook_path(path):
@@ -64,13 +72,20 @@ class GitHubPrivateStore:
         self._session.headers.pop("Authorization", None)
         self._session.close()
 
-    def _request(self, method, path, payload=None):
+    def _request(self, method, path, payload=None, *, missing_ok=False):
         if self.calls >= 128:
             raise PrivateStoreError("GITHUB_REQUEST_BUDGET")
         self.calls += 1
         try:
-            with self._session.request(method, self._url + path, json=payload,
+            base = "https://api.github.com" if method == "GET" and path.startswith("/users/") else self._url
+            with self._session.request(method, base + path, json=payload,
                     timeout=(5, 30), verify=True, allow_redirects=False, stream=True) as response:
+                if response.status_code == 204 and path == "/dispatches":
+                    return {}
+                if response.status_code == 201 and method == "POST" and path == "/actions/variables":
+                    return {}
+                if response.status_code == 404 and missing_ok and method == "GET":
+                    return None
                 if response.status_code not in {200, 201}:
                     raise PrivateStoreError("PRIVATE_STORE_REQUEST_FAILED")
                 content = bytearray()
@@ -79,11 +94,44 @@ class GitHubPrivateStore:
                     if len(content) > 8 * 1024 * 1024:
                         raise PrivateStoreError("PRIVATE_STORE_RESPONSE_LIMIT")
                 result = json.loads(content)
-                if type(result) is not dict:
+                if type(result) is not dict and not (path.startswith("/issues?") and type(result) is list):
                     raise PrivateStoreError("PRIVATE_STORE_INVALID_RESPONSE")
                 return result
         except Exception:
             raise PrivateStoreError("PRIVATE_STORE_REQUEST_FAILED") from None
+
+    def verify_private(self):
+        metadata = self._request("GET", "")
+        if metadata.get("private") is not True or metadata.get("visibility") != "private":
+            raise PrivateStoreError("DESTINATION_NOT_PRIVATE")
+
+    def dispatch_approval(self, day):
+        workflow = self.entries.get(APPROVAL_WORKFLOW_PATH, {})
+        if workflow.get("type") != "blob" or workflow.get("mode") != "100644":
+            raise ApprovalWorkflowMissing("APPROVAL_WORKFLOW_MISSING")
+        self.verify_private()
+        self._request("POST", "/dispatches", {
+            "event_type": "deye-recommendation", "client_payload": {"date": day}})
+
+    def install_approval_workflow(self, template):
+        if APPROVAL_WORKFLOW_PATH in self.entries:
+            return
+        metadata = self._request("GET", "")
+        if (metadata.get("private") is not True or metadata.get("visibility") != "private"
+                or metadata.get("default_branch") != "main"):
+            raise PrivateStoreError("APPROVAL_WORKFLOW_DESTINATION_INVALID")
+        # The Contents API requires a SHA to replace an existing file. A concurrent
+        # installation therefore cannot be overwritten by this create request.
+        self._request("PUT", "/contents/" + APPROVAL_WORKFLOW_PATH, {
+            "branch": "main", "message": "Install private Deye approval workflow",
+            "content": base64.b64encode(template).decode("ascii")})
+
+    def ensure_approval_variables(self, values):
+        for name, value in values.items():
+            path = "/actions/variables/" + name
+            if self._request("GET", path, missing_ok=True) is None:
+                self.verify_private()
+                self._request("POST", "/actions/variables", {"name": name, "value": value})
 
     def read(self, path):
         if not valid_data_path(path):

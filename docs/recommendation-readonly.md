@@ -119,7 +119,7 @@ recomendación, elimina o deshabilita `DEYE_RECOMMENDATION_ENABLED`.
 Las cifras son ficticias. El JSON guarda las opciones evaluadas, el peor ahorro
 por opción, los días usados, la previsión horaria, las incidencias, la huella de
 configuración y el commit de origen. La notificación y la aprobación pertenecen
-a la Fase 2. La aplicación y su verificación corresponden a fases posteriores.
+a la [Fase 2](approval.md). La aplicación y su verificación corresponden a fases posteriores.
 
 ## Pruebas y consumo de runner
 

@@ -419,7 +419,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("scripts/recommend_deye.py", recommendation["run"])
         self.assertIn("DEYE_RECOMMENDATION_ENABLED", recommendation["if"])
         self.assertEqual(set(recommendation["env"]),
-                         {"DEYE_RECOMMENDATION_ENABLED", "DEYE_RECOMMENDATION_DRY_RUN",
+                         {"DEYE_RECOMMENDATION_ENABLED", "DEYE_RECOMMENDATION_DRY_RUN", "DEYE_APPROVAL_ENABLED",
+                          "DEYE_APPROVAL_WORKFLOW_TOKEN",
+                          "DEYE_APPROVER_IDS", "DEYE_APPROVER_LOGINS", "DEYE_APPROVAL_CUTOFF",
                           "DEYE_DATA_REPOSITORY", "DEYE_DATA_TOKEN"})
         self.assertIn("DEYE_AUTOMATION_ENABLED", job["if"])
         self.assertIn("default_branch", job["if"])

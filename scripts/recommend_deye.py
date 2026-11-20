@@ -12,7 +12,7 @@ from time import monotonic
 import requests
 
 from deye_history_quality import MADRID, day_bounds, numeric, sample_time
-from deye_private_store import GitHubPrivateStore, canonical
+from deye_private_store import ApprovalWorkflowMissing, GitHubPrivateStore, canonical
 from deye_workbook import add_recommendation_sheet
 
 
@@ -402,6 +402,28 @@ def run(store, now, *, dry_run=False, fetch=forecast):
     return "RECORDED_" + result["recommendation"]["decision"].upper()
 
 
+def dispatch_approval(repository, data_token, public_repository, day):
+    workflow_token = os.environ.get("DEYE_APPROVAL_WORKFLOW_TOKEN")
+    values = {name: os.environ.get(name, "") for name in ("DEYE_APPROVER_IDS", "DEYE_APPROVER_LOGINS")}
+    if not workflow_token or not all(values.values()):
+        raise ApprovalWorkflowMissing("APPROVAL_CONFIGURATION_MISSING")
+    values.update(DEYE_APPROVAL_ENABLED="true", DEYE_APPROVAL_CUTOFF=os.environ.get("DEYE_APPROVAL_CUTOFF") or "23:00")
+    template = (Path(__file__).resolve().parents[1] / "config/deye-approval.workflow.example.json").read_bytes()
+    installer = GitHubPrivateStore(repository, workflow_token, public_repository=public_repository)
+    try:
+        installer.ensure_approval_variables(values)
+        installer.install_approval_workflow(template)
+    finally:
+        installer.close()
+
+    # Refresh the branch snapshot and dispatch with the ordinary data credential.
+    refreshed = GitHubPrivateStore(repository, data_token, public_repository=public_repository)
+    try:
+        refreshed.dispatch_approval(day)
+    finally:
+        refreshed.close()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Compute without publishing a private report.")
@@ -412,12 +434,20 @@ def main(argv=None):
     if not dry_run and os.environ.get("DEYE_RECOMMENDATION_ENABLED") != "true":
         return 0
     try:
-        store = GitHubPrivateStore(os.environ.get("DEYE_DATA_REPOSITORY"), os.environ.get("DEYE_DATA_TOKEN"),
-                                   public_repository=os.environ.get("GITHUB_REPOSITORY"))
+        repository = os.environ.get("DEYE_DATA_REPOSITORY")
+        data_token = os.environ.get("DEYE_DATA_TOKEN")
+        public_repository = os.environ.get("GITHUB_REPOSITORY")
+        store = GitHubPrivateStore(repository, data_token, public_repository=public_repository)
         try:
             result = run(store, now, dry_run=dry_run)
+            if not dry_run and os.environ.get("DEYE_APPROVAL_ENABLED") == "true":
+                dispatch_approval(repository, data_token, public_repository,
+                                  str(now.date() + timedelta(days=1)))
         finally:
             store.close()
+    except ApprovalWorkflowMissing:
+        print("Recommendation retained. Verify the approval variables and DEYE_APPROVAL_WORKFLOW_TOKEN in DeyeCloud, then rerun.")
+        return 1
     except Exception:
         print(f"Recommendation failed after {monotonic() - start:.1f} s. Private details suppressed.")
         return 1
