@@ -32,5 +32,12 @@
   "maximum_grid_reduction_cost_increase_eur": 0,
   "backup_reserve_soc": 0,
   "backup_autonomy_kwh": 0,
-  "fallback": "hold"
+  "fallback": "hold",
+  "tou_simulation_enabled": false,
+  "tou_horizon_days": 1,
+  "tou_search_passes": 3,
+  "tou_minimum_battery_voltage": 44,
+  "tou_terminal_eur_per_kwh": null,
+  "tou_export_limit_kw": 0,
+  "tou_credit_export": false
 }
