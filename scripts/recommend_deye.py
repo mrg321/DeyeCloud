@@ -14,6 +14,7 @@ import requests
 from deye_history_quality import MADRID, day_bounds, numeric, sample_time
 from deye_private_store import ApprovalWorkflowMissing, GitHubPrivateStore, canonical
 from deye_workbook import add_recommendation_sheet
+from deye_tou import Hour, comparison, model_limits, read_periods, simulate as simulate_tou
 
 
 UTC = timezone.utc
@@ -57,6 +58,8 @@ def settings(override=None, *, require_installation=False):
         "minimum_avoided_grid_charge_kwh": (0.001, 2400),
         "maximum_grid_reduction_cost_increase_eur": (0, 100),
         "backup_reserve_soc": (0, 100), "backup_autonomy_kwh": (0, 500),
+        "tou_minimum_battery_voltage": (1, 100),
+        "tou_export_limit_kw": (0, 100),
     }
     if not all(bounded(config[key], *bounds) for key, bounds in limits.items()):
         raise ValueError("INVALID_RECOMMENDATION_SETTING")
@@ -70,7 +73,13 @@ def settings(override=None, *, require_installation=False):
             or set(prices) != {"valley", "flat", "peak"}
             or not all(bounded(value, 0, 10) for value in prices.values())
             or type(config["history_days"]) is not int or not 1 <= config["history_days"] <= 366
-            or type(config["min_profiles"]) is not int or not 1 <= config["min_profiles"] <= 12):
+            or type(config["min_profiles"]) is not int or not 1 <= config["min_profiles"] <= 12
+            or type(config["tou_simulation_enabled"]) is not bool
+            or type(config["tou_credit_export"]) is not bool
+            or (config["tou_terminal_eur_per_kwh"] is not None
+                and not bounded(config["tou_terminal_eur_per_kwh"], 0, 10))
+            or type(config["tou_search_passes"]) is not int or not 1 <= config["tou_search_passes"] <= 5
+            or type(config["tou_horizon_days"]) is not int or config["tou_horizon_days"] not in (1, 2)):
         raise ValueError("INVALID_ENERGY_SETTINGS")
     end = 0
     for first, last, period in config["weekday_periods"]:
@@ -147,15 +156,15 @@ def day_type(day, config):
     return "weekend" if day.weekday() >= 5 else "weekday"
 
 
-def load_profile(samples, day, consumption):
-    """Integrate valid short power spans, then normalize to measured household kWh."""
+def load_profile(samples, day, consumption, *, power_key="TotalConsumptionPower"):
+    """Integrate valid short power spans, then normalize to a measured daily total."""
     hours = hour_starts(day)
     if len(hours) != 24:  # Use ordinary historical days to learn each wall-clock hour.
         return None
     start, end = day_bounds(day)
     points = {}
     for row in samples:
-        if row.get("key") != "TotalConsumptionPower":
+        if row.get("key") != power_key:
             continue
         stamp, _ = sample_time(row.get("timestamp"), None)
         value, unit = numeric(row.get("value")), row.get("unit")
@@ -223,11 +232,11 @@ def history(store, target, config):
     return next((rows for rows in groups if len(rows) >= config["min_profiles"]), selected)
 
 
-def evening_state(snapshot, now, config):
-    soc = targets = soc_time = None
+def measured_soc(snapshot, now, config):
+    soc = soc_time = None
     captured, _ = sample_time(snapshot.get("captured_at"), None)
     if captured is None or not timedelta(0) <= now - captured <= timedelta(minutes=config["max_soc_age_minutes"]):
-        return soc, targets, soc_time
+        return soc, soc_time
     readings = []
     for key in ("SOC", "BMSSOC"):
         reading = snapshot.get("latest_soc", {}).get(key) or {}
@@ -241,6 +250,15 @@ def evening_state(snapshot, now, config):
         soc_time = stamp.isoformat()
     if len(readings) == 2 and abs(readings[0][1] - readings[1][1]) > 10:
         soc = soc_time = None
+    return soc, soc_time
+
+
+def evening_state(snapshot, now, config):
+    soc, soc_time = measured_soc(snapshot, now, config)
+    captured, _ = sample_time(snapshot.get("captured_at"), None)
+    if captured is None or not timedelta(0) <= now - captured <= timedelta(minutes=config["max_soc_age_minutes"]):
+        return soc, None, soc_time
+    targets = None
     tou = snapshot.get("parameters", {}).get("deye_read_tou", {})
     data = tou.get("data") or {}
     slots = data.get("timeUseSettingItems") or []
@@ -255,10 +273,13 @@ def evening_state(snapshot, now, config):
     return soc, targets, soc_time
 
 
-def import_price(hour, kind, config):
-    period = "valley" if kind != "weekday" else next(
+def tariff_band(hour, kind, config):
+    return "valley" if kind != "weekday" else next(
         name for start, end, name in config["weekday_periods"] if start <= hour < end)
-    return config["prices"][period]
+
+
+def import_price(hour, kind, config):
+    return config["prices"][tariff_band(hour, kind, config)]
 
 
 def night_soc_limits(snapshot, config):
@@ -514,6 +535,158 @@ def recommendation(target, now, weather, selected, snapshot, config):
     return report
 
 
+def tou_hours(day, profile, weather, config):
+    kind = day_type(day, config)
+    expected = [datetime.fromtimestamp(stamp, MADRID) for stamp in hour_starts(day)]
+    records = weather.get("hours") or []
+    if kind is None or len(records) != len(expected):
+        raise ValueError("INCOMPLETE_TOU_FORECAST")
+    result = []
+    for stamp, row in zip(expected, records):
+        pv = numeric(row.get("pv_kwh"))
+        if row.get("hour") != stamp.isoformat() or pv is None or pv < 0:
+            raise ValueError("INCOMPLETE_TOU_FORECAST")
+        band = tariff_band(stamp.hour, kind, config)
+        result.append(Hour(stamp.isoformat(), stamp.hour, profile[stamp.hour], pv, config["prices"][band], band))
+    return result
+
+
+def night_window(config):
+    return {hour for start, end, band in config["weekday_periods"]
+            if start == 0 and band == "valley" for hour in range(start, end)}
+
+
+def replay_tou_day(day, daily, intraday, reference_snapshot, config):
+    """Replay metered load and PV with hindsight under a stated reference TOU."""
+    totals = daily["energy"]["device"]
+    samples = intraday["samples"]
+    load = load_profile(samples, day, totals["Consumption"])
+    pv = load_profile(samples, day, totals["Production"], power_key="TotalDCInputPower")
+    if load is None or pv is None:
+        raise ValueError("INSUFFICIENT_HOURLY_COVERAGE")
+    soc_samples = []
+    for row in samples:
+        if row["key"] != "SOC" or row["unit"] != "%":
+            continue
+        stamp, _ = sample_time(row["timestamp"], None)
+        soc = numeric(row["value"])
+        if stamp is not None and soc is not None and 0 <= soc <= 100:
+            soc_samples.append((stamp.timestamp(), soc))
+    start = hour_starts(day).start
+    opening = [row for row in soc_samples if 0 <= row[0] - start <= 600]
+    if not opening:
+        raise ValueError("MISSING_OPENING_SOC")
+    opening_stamp, soc = min(opening)
+    weather = {"hours": [{"hour": datetime.fromtimestamp(stamp, MADRID).isoformat(),
+                          "pv_kwh": pv[datetime.fromtimestamp(stamp, MADRID).hour]}
+                         for stamp in hour_starts(day)]}
+    hours = tou_hours(day, load, weather, config)
+    result = comparison(hours, read_periods(reference_snapshot), soc,
+                        model_limits(reference_snapshot, config), config,
+                        night_hours=night_window(config))
+    ordered = sorted(soc_samples)
+    first_at_reserve = next((right for (_, previous), (right, value) in zip(ordered, ordered[1:])
+                             if previous > config["reserve_soc"] >= value), None)
+    result["observed"] = {"totals_kwh": totals, "opening_soc": soc,
+                          "opening_at": datetime.fromtimestamp(opening_stamp, MADRID).isoformat(),
+                          "first_at_reserve": datetime.fromtimestamp(first_at_reserve, MADRID).isoformat()
+                          if first_at_reserve is not None else None}
+    return result
+
+
+def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetch):
+    report = {"decision": "abstain", "confidence": "low", "mode": "six_period_simulation",
+              "execution_enabled": False}
+
+    def median_profile(rows):
+        return [median(row[1][hour] for row in rows) for hour in range(24)]
+
+    try:
+        soc, measured_at = measured_soc(snapshot, now, config)
+        if measured_at is None:
+            raise ValueError("INVALID_OR_STALE_SOC")
+        periods = read_periods(snapshot)
+        limits = model_limits(snapshot, config)
+        if len(selected) < config["min_profiles"]:
+            raise ValueError("INSUFFICIENT_HOUSEHOLD_PROFILES")
+        profile = median_profile(selected)
+        hours = tou_hours(target, profile, weather, config)
+    except (ValueError, TypeError, KeyError) as error:
+        return {**report, "decision_reason": str(error)}
+
+    # Project measured SOC under the current TOU until local midnight. Neither
+    # measurements nor forecast hours are indexed by ambiguous wall time.
+    today = target - timedelta(days=1)
+    measured = datetime.fromisoformat(measured_at).timestamp()
+    remaining = []
+    for stamp in hour_starts(today):
+        duration = min(1., (stamp + 3600 - measured) / 3600)
+        if duration > 0:
+            local = datetime.fromtimestamp(stamp, MADRID)
+            remaining.append(Hour(local.isoformat(), local.hour, profile[local.hour] * duration,
+                                  0., 0., "projection", duration))
+    initial = simulate_tou(remaining, periods, soc, limits, config)["final_soc"]
+    issues = []
+    if config["tou_horizon_days"] == 2:
+        following = target + timedelta(days=1)
+        try:
+            following_kind = day_type(following, config)
+            next_profiles = [row for row in selected if day_type(row[0], config) == following_kind]
+            if following_kind is None or len(next_profiles) < config["min_profiles"]:
+                raise ValueError("INSUFFICIENT_SECOND_DAY_PROFILES")
+            second = fetch(following, config)
+            if second.get("confidence") != "medium":
+                raise ValueError("LOW_CONFIDENCE")
+            hours += tou_hours(following, median_profile(next_profiles), second, config)
+        except (requests.RequestException, ValueError, KeyError, TypeError, IndexError):
+            issues.append("SECOND_DAY_FORECAST_UNAVAILABLE")
+
+    outcome = comparison(hours, periods, initial, limits, config, night_hours=night_window(config))
+    reference, proposed = (outcome["strategies"][key] for key in ("current", "full"))
+    changes = []
+    for index, (before, after) in enumerate(zip(reference["periods"], proposed["periods"]), 1):
+        fields = [key for key in ("time", "soc", "enableGridCharge") if before[key] != after[key]]
+        if fields:
+            reasons = []
+            if "time" in fields:
+                reasons.append("Reubicar el inicio del periodo")
+            if "soc" in fields:
+                reasons.append("Aumentar el SOC objetivo para conservar energía" if after["soc"] > before["soc"]
+                               else "Bajar el SOC objetivo para liberar energía o reducir carga")
+            if "enableGridCharge" in fields:
+                reasons.append("Permitir carga de red hasta el objetivo" if after["enableGridCharge"]
+                               else "Desactivar la carga de red programada")
+            changes.append({"period": index, "fields": fields,
+                            "reason": ". ".join(reasons) + "."})
+    evening = [row for row in hours if row.stamp[:10] == str(target) and 18 <= row.hour < 22]
+    deficit = sum(max(0., row.load - row.pv) for row in evening)
+    evening_required = limits[0] + 100 * deficit / (
+        config["battery_usable_kwh"] * config["discharge_efficiency"])
+    kind = day_type(target, config)
+    season = (target.month % 12) // 3
+    comparable = sum(day_type(row[0], config) == kind and (row[0].month % 12) // 3 == season
+                     for row in selected)
+    return {**report, **outcome, "current_soc": soc, "soc_measured_at": measured_at,
+            "estimated_midnight_soc": initial, "minimum_soc": limits[0], "issues": issues,
+            "horizon": {"start": hours[0].stamp, "hours": len(hours)},
+            "confidence": ("medium" if weather.get("confidence") == "medium" and not issues
+                           and comparable >= config["min_profiles"] else "low"),
+            "snapshot_sha256": hashlib.sha256(canonical(snapshot["parameters"])).hexdigest(),
+            "changes": changes, "decision": "review" if changes else "hold",
+            "decision_reason": "SIMULATED_TOU_CHANGE" if changes else "NO_ROBUST_TOU_CHANGE",
+            "evening": {"load_kwh": sum(row.load for row in evening), "pv_kwh": sum(row.pv for row in evening),
+                        "deficit_kwh": deficit, "required_start_soc": evening_required,
+                        "extra_flat_import_cost_eur": sum(
+                            (b["import_kwh"] - a["import_kwh"]) * a["price"]
+                            for a, b in zip(reference["hours"], proposed["hours"])
+                            if a["hour"][:10] == str(target) and a["band"] == "flat"
+                            and int(a["hour"][11:13]) < 18),
+                        "baseline_import_cost_eur": sum(row["import_kwh"] * row["price"] for row in reference["hours"]
+                                                        if row["hour"][:10] == str(target) and 18 <= int(row["hour"][11:13]) < 22),
+                        "full_import_cost_eur": sum(row["import_kwh"] * row["price"] for row in proposed["hours"]
+                                                    if row["hour"][:10] == str(target) and 18 <= int(row["hour"][11:13]) < 22)}}
+
+
 def run(store, now, *, dry_run=False, recalculate=False, fetch=forecast):
     today = now.astimezone(MADRID).date()
     target = today + timedelta(days=1)
@@ -539,6 +712,8 @@ def run(store, now, *, dry_run=False, recalculate=False, fetch=forecast):
               "settings_sha256": hashlib.sha256(canonical(config)).hexdigest(),
               "history_commit": store.head, "forecast": weather,
               "recommendation": recommendation(target, now, weather, selected, snapshot, config)}
+    if config["tou_simulation_enabled"]:
+        result["tou_simulation"] = tou_recommendation(target, now, weather, selected, snapshot, config, fetch=fetch)
     if dry_run:
         return "DRY_RUN_COMPLETED"
     changes = {path: result}

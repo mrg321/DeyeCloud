@@ -42,7 +42,7 @@
         {
           "name": "Run offline recommendation tests",
           "if": "${{ vars.DEYE_RECOMMENDATION_ENABLED == 'true' || inputs.recommendation_dry_run }}",
-          "run": "python -B -m unittest discover -s tests -p test_recommend_deye.py -q"
+          "run": "python -B -m unittest discover -s tests -p test_recommend_deye.py -q && python -B -m unittest discover -s tests -p test_deye_tou.py -q"
         },
         {
           "name": "Create private-repository installation token",

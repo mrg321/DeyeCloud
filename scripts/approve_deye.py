@@ -9,6 +9,7 @@ import re
 
 from deye_history_quality import MADRID
 from deye_private_store import GitHubPrivateStore, canonical
+from deye_tou import read_periods
 
 
 COMMAND = re.compile(r"/deye (approve|reject|cancel) (\d{4}-\d{2}-\d{2}) ([a-f0-9]{64})")
@@ -50,6 +51,8 @@ def reviewer_ids(raw):
 
 
 def issue_text(payload, identity, report):
+    if payload["schema_version"] == 2:
+        return tou_issue_text(payload, identity, report["tou_simulation"])
     result, forecast = report["recommendation"], report["forecast"]
 
     def value(record, key, suffix=""):
@@ -86,6 +89,70 @@ def issue_text(payload, identity, report):
     else:
         body.append("Informe informativo. Esta recomendación no solicita un cambio.")
     return "\n\n".join(body[:12]) + "\n\n" + "\n".join(body[12:])
+
+
+def tou_issue_text(payload, identity, result):
+    lines = [f"**Simulación TOU · {payload['date']}**", "",
+             "La aprobación registra una revisión de la simulación. La ejecución está deshabilitada.",
+             f"Caduca {payload['expires_at']} · confianza {result['confidence']}"]
+    strategies = result.get("strategies")
+    if strategies:
+        lines += ["", f"SOC medido {result['current_soc']:.1f} % · "
+                  f"SOC proyectado a medianoche {result['estimated_midnight_soc']:.1f} % · "
+                  f"horizonte {result['horizon']['hours']} h",
+                  "", "| Estrategia | Coste neto | Carga red | Compra punta | SOC 18 h | SOC 22 h | SOC final |",
+                  "|---|---:|---:|---:|---:|---:|---:|"]
+        for key, name in (("current", "Vigente"), ("night", "Nocturna"), ("full", "Completa")):
+            row = strategies[key]
+            lines.append(f"| {name} | {row['net_cost_eur']:.2f} € | {row['grid_charge_kwh']:.2f} kWh | "
+                         f"{row['peak_import_kwh']:.2f} kWh | {row['soc_at_18']:.1f} % | "
+                         f"{row['soc_at_22']:.1f} % | {row['final_soc']:.1f} % |")
+        full, current = strategies["full"], strategies["current"]
+        evening = result["evening"]
+        lines += ["", f"Consumo estimado {full['load_kwh']:.2f} kWh · FV estimada {full['pv_kwh']:.2f} kWh",
+                  f"Ahorro neto estimado {full['avoided_net_cost_eur']:.2f} € · "
+                  f"ahorro ajustado por SOC final {full['avoided_objective_eur']:.2f} €",
+                  f"Ahorro frente a la estrategia nocturna {full['saving_vs_night_eur']:.2f} € · "
+                  f"compras en punta evitadas {full['avoided_peak_import_kwh']:.2f} kWh",
+                  f"De 18:00 a 22:00 se prevén {evening['load_kwh']:.2f} kWh de consumo y "
+                  f"{evening['pv_kwh']:.2f} kWh de FV. El SOC teórico inicial para cubrir el déficit es "
+                  f"{evening['required_start_soc']:.1f} %.",
+                  "", "| Periodo | Vigente | Propuesto | Campos que cambian |", "|---|---|---|---|"]
+        changes = {row["period"]: row["reason"] for row in result["changes"]}
+        for i, (before, after) in enumerate(zip(current["periods"], full["periods"])):
+            def describe(periods, row):
+                start, end = row["time"], periods[(i + 1) % 6]["time"]
+                charge = "ON" if row["enableGridCharge"] else "OFF"
+                return f"{start[:2]}:{start[2:]}–{end[:2]}:{end[2:]} · {row['soc']} % · {charge}"
+
+            lines.append(f"| {i + 1} | {describe(current['periods'], before)} | "
+                         f"{describe(full['periods'], after)} | {changes.get(i + 1, 'Igual')} |")
+        lines += ["", "<details><summary>Curvas horarias estimadas</summary>", ""]
+        for key, title in (("soc_end", "SOC"), ("load_kwh", "Consumo"), ("pv_kwh", "FV"),
+                           ("import_kwh", "Compra"), ("price", "Precio")):
+            values = [row[key] for row in full["hours"]]
+            low, high = min(values), max(values)
+            bars = "▁▂▃▄▅▆▇█"
+            graph = "".join(bars[round(7 * (value - low) / (high - low))] if high > low else bars[0]
+                            for value in values)
+            lines.extend([f"{title} · {low:.3f} a {high:.3f}", "", f"`{graph}`", ""])
+        lines += ["</details>"]
+    lines += ["", result["decision_reason"]]
+    if payload["actionable"]:
+        lines += ["", "~~~text", *(f"/deye {command} {payload['date']} {identity}" for command in DECISIONS), "~~~"]
+    return "\n".join(lines)
+
+
+def tou_preflight(payload, snapshot):
+    """Compare a fresh read supplied by the caller. No command is ever emitted."""
+    try:
+        periods = [period.record() for period in read_periods(snapshot)]
+        if (digest(snapshot["parameters"]) != payload["snapshot_sha256"]
+                or periods != payload["current_periods"]):
+            return "CONFIGURATION_CHANGED"
+    except (ValueError, KeyError, TypeError):
+        return "CONFIGURATION_UNAVAILABLE"
+    return "EXECUTION_DISABLED"
 
 
 def terminal(day, identity, status, now, **actor):
@@ -132,10 +199,12 @@ def notify(store, day, cutoff, now, reviewers):
         return "NO_RECOMMENDATION"
     deadline = expiry(day, cutoff)
     result = report["recommendation"]
+    phase3 = report.get("tou_simulation")
     targets = result.get("current_targets")
     target = result.get("recommended_soc")
-    actionable = result["decision"] == "recommend" and now < deadline
-    if actionable and (type(target) is not int or not 0 <= target <= 100
+    wants_review = (phase3["decision"] == "review" if phase3 is not None else result["decision"] == "recommend")
+    actionable = wants_review and now < deadline
+    if phase3 is None and actionable and (type(target) is not int or not 0 <= target <= 100
                        or type(targets) is not list or len(targets) != 2
                        or any(type(item) is not int or not 0 <= item <= 100 for item in targets)
                        or targets == [target, target]):
@@ -149,6 +218,13 @@ def notify(store, day, cutoff, now, reviewers):
                "expires_at": deadline.isoformat(), "current_targets": targets,
                "slots_madrid": ["00:00–05:00", "05:00–08:00"],
                "proposed_targets": [target, target] if actionable else None, "actionable": actionable}
+    if phase3 is not None:
+        strategies = phase3.get("strategies", {})
+        payload = {"schema_version": 2, "date": day, "report_sha256": report_hash,
+                   "expires_at": deadline.isoformat(), "actionable": actionable,
+                   "execution_enabled": False, "snapshot_sha256": phase3.get("snapshot_sha256"),
+                   "current_periods": strategies.get("current", {}).get("periods"),
+                   "proposed_periods": strategies.get("full", {}).get("periods")}
     identity = digest(payload)
     if proposal_path(day, identity) in store.entries:
         return "PREVIOUS_PROPOSAL"
@@ -180,7 +256,7 @@ def notify(store, day, cutoff, now, reviewers):
             day, previous, "superseded", now, replacement=identity, issue=previous_issue)
         close.append(previous_issue)
     if not actionable:
-        status = "expired" if result["decision"] == "recommend" else "no_change"
+        status = "expired" if wants_review else "no_change"
         changes[decision_path(day, identity)] = terminal(day, identity, status, now, issue=number)
         close.append(number)
     store.publish(changes)
@@ -229,6 +305,17 @@ def decide(store, event, reviewers, now):
     if created > now or created < datetime.fromisoformat(record["created_at"]).replace(microsecond=0):
         return "INVALID_EVENT_TIME"
     status = "expired" if max(created, now) >= deadline else DECISIONS[command]
+    if payload["schema_version"] == 2 and status == "approved":
+        snapshot_day = date.fromisoformat(day) - timedelta(days=1)
+        snapshot = store.read(f"evening/{snapshot_day}.json") or {}
+        preflight = tou_preflight(payload, snapshot)
+        latest_parameters = store.read("parameters/latest.json")
+        if (preflight == "EXECUTION_DISABLED" and latest_parameters is not None
+                and digest(latest_parameters) != payload["snapshot_sha256"]):
+            preflight = "CONFIGURATION_CHANGED"
+        status = {"EXECUTION_DISABLED": "simulation_approved",
+                  "CONFIGURATION_CHANGED": "configuration_changed",
+                  "CONFIGURATION_UNAVAILABLE": "configuration_unavailable"}[preflight]
     store.publish({path: terminal(day, identity, status, now, actor_id=actor["id"],
                                   actor_login=actor["login"], command=command, comment_id=original["id"],
                                   commented_at=created.isoformat(), issue=record["issue"])})

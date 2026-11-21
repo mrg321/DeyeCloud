@@ -41,7 +41,7 @@ def cell(value, reference):
 
 
 def worksheet(rows):
-    widths = [len(header) for header in rows[0]]
+    widths = [0] * max(map(len, rows))
     xml_rows = []
     for number, row in enumerate(rows, 1):
         cells = []
@@ -113,6 +113,26 @@ def add_recommendation_sheet(workbook, report):
                      (f"{targets} — Final SOC (%)", option.get("end_soc")),
                      (f"{targets} — Cumulative saving vs current TOU (EUR)",
                       option.get("cumulative_saving_eur", option.get("saving_eur")))])
+    phase3 = report.get("tou_simulation")
+    if phase3:
+        rows.extend([(), ("Simulación de seis periodos", phase3["decision_reason"]),
+                     ("Confianza", phase3["confidence"]), ("SOC medido (%)", phase3.get("current_soc")),
+                     ("SOC proyectado al inicio (%)", phase3.get("estimated_midnight_soc"))])
+        for name, strategy in phase3.get("strategies", {}).items():
+            rows.extend([(), ("Estrategia", name), ("Coste neto (EUR)", strategy["net_cost_eur"]),
+                         ("Coste ajustado (EUR)", strategy["objective_eur"]),
+                         ("Compra en punta (kWh)", strategy["peak_import_kwh"]),
+                         ("Carga de red (kWh)", strategy["grid_charge_kwh"]),
+                         ("SOC a las 18:00 (%)", strategy["soc_at_18"]),
+                         ("SOC a las 22:00 (%)", strategy["soc_at_22"]),
+                         ("SOC final (%)", strategy["final_soc"]),
+                         ("Inicio periodo", "SOC (%)", "Grid Charge")])
+            rows.extend((period["time"], period["soc"], "ON" if period["enableGridCharge"] else "OFF")
+                        for period in strategy["periods"])
+            rows.append(("Hora Madrid", "SOC inicial (%)", "SOC final (%)", "Consumo (kWh)",
+                         "FV (kWh)", "Compra (kWh)", "Precio (EUR/kWh)"))
+            rows.extend((row["hour"], row["soc_start"], row["soc_end"], row["load_kwh"],
+                         row["pv_kwh"], row["import_kwh"], row["price"]) for row in strategy["hours"])
     sheet = worksheet(rows).encode("utf-8")
     output = BytesIO()
     with ZipFile(BytesIO(workbook)) as source:

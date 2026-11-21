@@ -210,3 +210,47 @@ facturable es cero. Si el código se ejecutara desde un repositorio privado,
 se redondearía cada job a minutos enteros hacia arriba y se aplicaría la
 cuota correspondiente. Esta fase ejecuta cero aplicaciones y verificaciones.
 [Facturación de GitHub Actions](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+# Simulación de seis periodos TOU
+
+La fase 3 reutiliza la captura vespertina, la previsión de Open-Meteo, los perfiles de consumo, la configuración de tarifas y el almacén privado. Se habilita únicamente como simulación con `tou_simulation_enabled: true` en la configuración privada. El valor de ejemplo es `false`. Se conservan el cálculo nocturno y el formato de aprobación anterior, y el informe privado añade `tou_simulation` cuando la opción está activa. Si la revisión móvil está habilitada, muestra la simulación completa en el issue privado. El libro diario incorpora las tres estrategias y sus series horarias.
+
+## Modelo y búsqueda
+
+El horizonte empieza a medianoche de Madrid. Las horas se recorren por tiempo real, con 23 o 25 intervalos en días de cambio de hora. El SOC medido y el SOC proyectado a medianoche se presentan por separado. La proyección usa la carga de vivienda histórica, el TOU de la captura y generación solar cero antes de medianoche. Para dos días se exige una previsión solar completa de confianza media y suficientes perfiles para el tipo del segundo día. Si faltan, se usa un día y se registra el motivo. En dos días se repite el mismo TOU y se aplican las tarifas de cada fecha.
+
+Cada hora asigna la FV al consumo directo y permite almacenar el excedente, con límites de potencia y capacidad. Compra la demanda residual, más la carga de batería autorizada por el Grid Charge simulado. El SOC TOU actúa como suelo de descarga y, con Grid Charge ON, como objetivo de carga. El límite de importación configurado restringe la carga adicional de batería. Un exceso causado por el consumo de vivienda se refleja como importación. Las pérdidas afectan al balance, a las compras y a los excedentes, por lo que ya están incorporadas en el coste. El objetivo resta del coste neto el valor final de la energía utilizable por encima de la reserva. El informe muestra ambos importes.
+
+Un simulador común compara el TOU vigente, una estrategia que solo cambia la carga nocturna y otra que puede ajustar hasta seis periodos. La nocturna conserva los horarios y solo cambia los periodos que cubren exactamente el valle inicial. Si el TOU vigente no permite aislar esa franja, la referencia nocturna conserva el TOU vigente. La búsqueda completa parte del TOU vigente, la mejor solución nocturna y las fronteras de tarifa si hay seis. Explora por coordenadas fronteras vecinas y tarifarias, objetivos SOC y Grid Charge, en pasadas deterministas. Memoriza las simulaciones. El coste es proporcional a los candidatos visitados por las seis coordenadas y las horas por escenario. Se renuncia a la garantía de óptimo global para evitar el producto cartesiano de horarios, SOC y banderas.
+
+Se evalúan el escenario central y cuatro combinaciones de incertidumbre de FV y demanda. La propuesta requiere una mejora de al menos `minimum_saving_eur` en el coste ajustado en todos los escenarios, o evitar al menos `minimum_avoided_grid_charge_kwh` sin encarecer el coste neto ni ajustado. La selección usa el coste ajustado y, para desempatar, la carga desde red, las pérdidas, las compras en punta, la FV almacenada y el número de periodos cambiados. Se evita introducir nuevas ventanas de carga de red en punta. Si el SOC inicial medido o proyectado ya está por debajo de la reserva, una propuesta solo es elegible si recupera la reserva al final de la primera hora en todos los escenarios. El informe calcula el déficit de 18:00 a 22:00 y el SOC teórico para cubrirlo, que puede superar el 100 % o resultar inalcanzable por potencia.
+
+## Parámetros y límites
+
+| Campo privado | Valor de ejemplo | Uso |
+|---|---:|---|
+| `tou_simulation_enabled` | `false` | Añade el informe de fase 3 |
+| `tou_horizon_days` | `1` | Uno o dos días civiles |
+| `tou_search_passes` | `3` | Pasadas máximas por punto de partida |
+| `tou_minimum_battery_voltage` | `44` | Hipótesis conservadora para convertir amperios a kW. Confirmar el valor de la instalación |
+| `tou_terminal_eur_per_kwh` | `null` | Valor por kWh almacenado por encima de reserva. Si es nulo, usa el precio valle configurado |
+| `tou_export_limit_kw` | `0` | Límite de exportación FV simulado |
+| `tou_credit_export` | `false` | Valora el excedente FV a `export_price` cuando el contrato y el modo lo permiten |
+
+La reserva, la autonomía de respaldo, los objetivos discretos, las eficiencias, las tarifas, el calendario y los márgenes de previsión se toman de la configuración de recomendación existente. La potencia de batería se limita además por las corrientes configuradas leídas. Esas corrientes no reflejan necesariamente la limitación instantánea del BMS por tensión, temperatura o estado de carga. La simulación aproxima flujos horarios y no modela picos dentro de la hora, recuperaciones autónomas de seguridad ni venta desde batería. La compensación fija opcional no incorpora límites mensuales, impuestos ni batería virtual. Debe permanecer deshabilitada cuando esas reglas puedan afectar a la decisión.
+
+Solo se simulan cambios en inicio, SOC y Grid Charge. Los seis inicios se interpretan como un ciclo continuo. La última fila acaba en el primer inicio del siguiente día, incluida la representación de medianoche como `0000` en el modelo. Las capturas con granularidad inferior a una hora o con generador se descartan. El fabricante documenta `Power` como un máximo de descarga, por lo que se usa como límite leído y se mantiene fijo por fila. Sell, modo de trabajo, parámetros de seguridad, corrientes y red quedan fuera de los planes. Las lecturas públicas del API y la captura privada permiten confirmar los campos devueltos, pero no verifican el comportamiento de la versión instalada al cambiar parámetros durante un periodo activo.
+
+- [Manual Deye SUN-3.6–8K-SG05LP1-EU](https://www.deyeinverter.com/deyeinverter/2026/01/30/rand/2781/%E3%80%90b%E3%80%91manual_sun-3.6-8k-sg05lp1-eu_20260130_en.pdf)
+- [Portal DeyeCloud OpenAPI](https://developer.deyecloud.com/)
+
+## Validación y coste de ejecución
+
+`replay_tou_day` recibe los registros privados diarios e intradiarios y una lectura TOU de referencia. Integra intervalos válidos cortos de potencia y normaliza consumo y FV contra sus totales medidos. Requiere cobertura horaria suficiente y una lectura SOC en los primeros diez minutos. Los resultados son contrafactuales con conocimiento posterior. Si falta el TOU histórico, debe identificarse la fecha del TOU de referencia. La simulación validó días laborables de producción baja y alta y descartó días incompletos. El fin de semana y la batería inicial al 100 % se ejercitan también con datos sintéticos.
+
+La prueba local con 909 candidatos tardó unos 0,32 segundos para 24 h y con 1.328 candidatos unos 0,89 segundos para 48 h. El cálculo nocturno original explora una lista corta de SOC y tiene menor coste de CPU. No se añaden dependencias ni jobs. La latencia de GitHub y Open-Meteo, la instalación de requisitos y el redondeo por job pesan más que el cálculo. Para presupuestar, usar aproximadamente 1–2 minutos por ejecución diaria de colección y recomendación y 1 minuto por cada job de notificación o decisión. Son estimaciones sin ejecución en GitHub Actions. Se mantienen el disparo externo y el flujo sin espera.
+
+## Revisión y activación futura
+
+La revisión de fase 3 fija por hash el informe, la configuración de referencia, los seis periodos propuestos y la caducidad. Se reutilizan la identidad del aprobador, los comandos móviles, la protección contra edición y la idempotencia. Una discrepancia con la última captura privada invalida el voto de aprobación. Una revisión favorable solo registra `simulation_approved`. El proceso no tiene cliente del inversor ni ruta de aplicación.
+
+Antes de una futura activación, hace falta autorización expresa y validar en el equipo la resolución horaria, el cierre a medianoche, Grid Charge, el SOC como límite de descarga, la actuación por debajo del objetivo y los cambios durante un periodo activo. También hacen falta una lectura en directo de TOU, SOC y protecciones justo antes de cualquier operación, comparación con el estado aprobado, comprobación de la ventana horaria y permiso de escritura mínimo. Deben verificarse lectura posterior, auditoría y manejo de errores parciales con un mecanismo de aplicación separado. La aprobación de una simulación no se puede reutilizar como autorización de aplicación.
