@@ -144,6 +144,7 @@ def forecast(day, config, *, get=requests.get):
             "irradiation_kwh_m2": sum(row["irradiation_kwh_m2"] for row in records),
             "cloud_cover_mean_pct": sum(row["cloud_cover_pct"] for row in records) / len(records),
             "pv_kwh": sum(row["pv_kwh"] for row in records), "hours": records,
+            "pv_model": {key: config[key] for key in ("pv_kwp", "pv_losses", "tilt", "azimuth")},
             "confidence": "medium", "issues": []}
 
 

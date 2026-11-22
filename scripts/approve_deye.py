@@ -52,7 +52,7 @@ def reviewer_ids(raw):
 
 def issue_text(payload, identity, report):
     if payload["schema_version"] == 2:
-        return tou_issue_text(payload, identity, report["tou_simulation"])
+        return tou_issue_text(payload, identity, report["tou_simulation"], report["forecast"])
     result, forecast = report["recommendation"], report["forecast"]
 
     def value(record, key, suffix=""):
@@ -68,7 +68,7 @@ def issue_text(payload, identity, report):
         f"**TOU actual a las 00:00 / 05:00:** {baseline}",
         f"**SOC recomendado:** {value(result, 'recommended_soc', ' %')}",
         f"**Sol efectivo:** {value(forecast, 'sunshine_hours', ' h')}",
-        f"**Producción FV:** {value(forecast, 'pv_kwh', ' kWh')}",
+        f"**Producción FV:** {value(forecast, 'pv_kwh', ' kWh')}" + pv_forecast_explanation(forecast),
         f"**Consumo previsto:** {value(result, 'expected_load_kwh', ' kWh')}",
         f"**Aporte de batería 08:00–24:00:** {value(result, 'expected_battery_output_08_24_kwh', ' kWh')}",
         f"**Ahorro estimado:** {value(result, 'estimated_saving_eur', ' EUR')}",
@@ -91,7 +91,27 @@ def issue_text(payload, identity, report):
     return "\n\n".join(body[:12]) + "\n\n" + "\n".join(body[12:])
 
 
-def tou_issue_text(payload, identity, result):
+def pv_forecast_explanation(forecast):
+    # Older reports must still render exactly as they did when their issue was created.
+    model = forecast.get("pv_model")
+    if model is None:
+        return ""
+    minutes = round(forecast["sunshine_hours"] * 60)
+    hours, minutes = divmod(minutes, 60)
+    irradiation = f"{forecast['irradiation_kwh_m2']:.4f}".replace(".", ",")
+    return (
+        f"\n\n**Sol previsto para el día objetivo:** {hours} h {minutes:02d} min. "
+        f"Open-Meteo prevé {irradiation} kWh/m² de irradiación diaria sobre los paneles "
+        f"({model['tilt']:g}° de inclinación y {model['azimuth']:g}° de acimut). "
+        f"Esa irradiación equivale a {irradiation} horas solares pico al dividirla "
+        f"por la irradiancia de referencia de 1 kW/m². "
+        f"La producción FV del día se calcula multiplicando esas horas por la potencia "
+        f"nominal de {model['pv_kwp']:g} kWp y por el factor (1 − {model['pv_losses']:.2%}), "
+        f"lo que da **{forecast['pv_kwh']:.2f} kWh**."
+    )
+
+
+def tou_issue_text(payload, identity, result, forecast):
     lines = [f"**Simulación TOU · {payload['date']}**", "",
              "La aprobación registra una revisión de la simulación. La ejecución está deshabilitada.",
              f"Caduca {payload['expires_at']} · confianza {result['confidence']}"]
@@ -109,7 +129,8 @@ def tou_issue_text(payload, identity, result):
                          f"{row['soc_at_22']:.1f} % | {row['final_soc']:.1f} % |")
         full, current = strategies["full"], strategies["current"]
         evening = result["evening"]
-        lines += ["", f"Consumo estimado {full['load_kwh']:.2f} kWh · FV estimada {full['pv_kwh']:.2f} kWh",
+        lines += ["", f"Consumo estimado {full['load_kwh']:.2f} kWh · FV estimada {full['pv_kwh']:.2f} kWh"
+                  + pv_forecast_explanation(forecast),
                   f"Ahorro neto estimado {full['avoided_net_cost_eur']:.2f} € · "
                   f"ahorro ajustado por SOC final {full['avoided_objective_eur']:.2f} €",
                   f"Ahorro frente a la estrategia nocturna {full['saving_vs_night_eur']:.2f} € · "
