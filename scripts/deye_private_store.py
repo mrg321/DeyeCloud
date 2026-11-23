@@ -30,7 +30,7 @@ def blob_sha(content):
 
 def valid_data_path(path):
     return bool(re.fullmatch(
-        r"(?:config/(?:installation|recommendation)\.json|state/collection\.json|parameters/latest\.json|"
+        r"(?:config/(?:installation|recommendation|night_soc)\.json|state/collection\.json|parameters/latest\.json|"
         r"originals/[a-f0-9]{64}\.json|(?:daily|intraday|consumption|evening|recommendations|approvals/current)/\d{4}-\d{2}-\d{2}\.json|"
         r"approvals/(?:proposals|decisions)/\d{4}-\d{2}-\d{2}/[a-f0-9]{64}\.json)", path))
 

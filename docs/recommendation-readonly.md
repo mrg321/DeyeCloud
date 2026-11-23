@@ -83,6 +83,20 @@ recomendación, elimina o deshabilita `DEYE_RECOMMENDATION_ENABLED`.
 
 ## Previsión y cálculo económico
 
+El mínimo al final de la ventana nocturna puede configurarse con
+`minimum_night_soc_next_non_valley` y `minimum_night_soc_next_valley` en el
+archivo privado `config/night_soc.json` o en `config/recommendation.json`.
+Si se usa el archivo separado, sus valores prevalecen. Cada parámetro ausente
+o nulo hereda `minimum_night_soc`. La hora de comprobación sale del final del
+valle inicial del horario laborable y la tarifa a esa hora se toma del
+calendario del día objetivo.
+
+Ambos recomendadores simulan si la batería llega al mínimo al terminar esa
+ventana. Si el plan vigente no llega en todos los escenarios, se muestra la
+alternativa viable de menor coste estimado aunque quede por debajo del umbral
+de ahorro. Si ninguna alternativa evaluada lo alcanza, se informa del
+incumplimiento. El JSON, el Excel y el issue muestran tarifa, mínimo y SOC previsto.
+
 Los candidatos nocturnos predeterminados son `[30, 40, 50, 60, 70, 80]`.
 Si la configuración privada ya define `targets`, añade el 30 a esa lista
 para evaluarlo. El TOU actual se simula como referencia aunque supere el 80 %.

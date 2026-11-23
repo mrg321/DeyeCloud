@@ -12,6 +12,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from deye_history_quality import MADRID, UTC
+from deye_private_store import valid_data_path
 from deye_workbook import SHEET_NS, add_recommendation_sheet, collection_workbook
 import recommend_deye
 from recommend_deye import (ENERGY_FIELDS, TOU_TIMES, WEATHER_FIELDS, day_type, forecast,
@@ -65,6 +66,34 @@ class Store:
 
 
 class ReadOnlyRecommendationTests(unittest.TestCase):
+    def test_night_minimum_follows_the_tariff_at_the_configured_cutoff(self):
+        overrides = {"minimum_night_soc": 32, "minimum_night_soc_next_non_valley": 35,
+                     "minimum_night_soc_next_valley": 30,
+                     "weekday_periods": [[0, 5, "valley"], [5, 7, "valley"], [7, 24, "flat"]]}
+        config = settings(overrides)
+        policy = recommend_deye.night_soc_policy
+        self.assertEqual(policy(date(2026, 11, 23), config), (7, "flat", 35))
+        self.assertEqual(policy(date(2026, 11, 21), config), (7, "valley", 30))
+        self.assertEqual(policy(date(2026, 12, 8), config), (7, "valley", 30))
+        config["minimum_night_soc_next_valley"] = None
+        self.assertEqual(policy(date(2026, 12, 8), config), (7, "valley", 32))
+        with self.assertRaises(ValueError):
+            settings({**overrides, "minimum_night_soc_next_valley": 101})
+
+    def test_simple_recommender_checks_achieved_night_soc_before_savings(self):
+        config = settings({"minimum_night_soc_next_non_valley": 35,
+                           "verified_device_minimum_soc": 30, "minimum_saving_eur": 10})
+        live = snapshot(30, (30, 30), protection={"battShutDownCapacity": 10, "battLowCapacity": 20})
+        outcome = recommendation(TARGET, NOW, solar(0), profiles(1), live, config)
+        self.assertEqual(outcome["decision_reason"], "NIGHT_SOC_MINIMUM_REQUIRES_CHANGE")
+        self.assertGreaterEqual(outcome["recommended_soc"], 35)
+        self.assertGreaterEqual(outcome["night_soc"]["proposed_soc"] + 1e-9, 35)
+        self.assertLess(outcome["estimated_saving_eur"], config["minimum_saving_eur"])
+
+        outcome = recommendation(TARGET, NOW, solar(0), profiles(1), live, dict(config, grid_kw=0.1))
+        self.assertEqual(outcome["decision_reason"], "NIGHT_SOC_UNREACHABLE")
+        self.assertEqual(outcome["decision"], "hold")
+
     def test_november_21_flat_tariff_low_confidence_and_threshold(self):
         target = date(2026, 11, 21)
         # Reconstruct an hourly profile from the reported daily totals. All PV is consumed directly.
@@ -325,13 +354,19 @@ class ReadOnlyRecommendationTests(unittest.TestCase):
         self.assertEqual(result["current_targets"], [40, 50])
 
     def test_weather_failure_is_private_and_dispatch_is_idempotent(self):
-        store = Store({"config/recommendation.json": settings(), f"evening/{NOW.date()}.json": snapshot()})
+        self.assertTrue(valid_data_path("config/night_soc.json"))
+        store = Store({"config/recommendation.json": settings(),
+                       "config/night_soc.json": {"minimum_night_soc_next_non_valley": 35,
+                                                 "minimum_night_soc_next_valley": 30},
+                       f"evening/{NOW.date()}.json": snapshot()})
         fetch = Mock(side_effect=requests.Timeout("sensitive"))
         self.assertEqual(run(store, NOW, dry_run=True, fetch=fetch), "DRY_RUN_COMPLETED")
         store.publish.assert_not_called()
         self.assertEqual(run(store, NOW, fetch=fetch), "RECORDED_HOLD")
         report = store.entries[f"recommendations/{TARGET}.json"]
         self.assertEqual(report["forecast"]["confidence"], "unavailable")
+        self.assertEqual(fetch.call_args.args[1]["minimum_night_soc_next_non_valley"], 35)
+        self.assertEqual(fetch.call_args.args[1]["minimum_night_soc_next_valley"], 30)
         self.assertNotIn("sensitive", str(report))
         self.assertEqual(run(store, NOW, fetch=fetch), "ALREADY_RECORDED")
         self.assertEqual(fetch.call_count, 2)

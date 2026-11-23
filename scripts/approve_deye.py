@@ -83,6 +83,8 @@ def issue_text(payload, identity, report):
     if "lower_targets_verified" in result:
         body.insert(12, f"**Reserva operativa:** {value(result, 'reserve_soc', ' %')} · "
                     f"**Mínimo nocturno permitido:** {value(result, 'minimum_allowed_soc', ' %')}.")
+    if "night_soc" in result:
+        body.insert(12, night_soc_text(result["night_soc"]))
     if payload["actionable"]:
         body += ["Comenta exactamente uno de estos comandos:", "~~~text",
                  *(f"/deye {command} {payload['date']} {identity}" for command in DECISIONS), "~~~"]
@@ -111,10 +113,24 @@ def pv_forecast_explanation(forecast):
     )
 
 
+def night_soc_text(night):
+    band = {"valley": "valle", "flat": "llano", "peak": "punta"}.get(night["next_band"], "sin tarifa disponible")
+    hour = "00:00 del día siguiente" if night["hour"] == 24 else f"{night['hour']:02d}:00"
+    message = (f"**SOC a las {hour} (tarifa {band}):** mínimo {night['minimum_soc']:g} % · "
+               f"vigente {night['current_soc']:.1f} % · alternativa {night['proposed_soc']:.1f} %.")
+    if night["status"] == "unreachable":
+        return message + " Ninguna alternativa evaluada alcanza el mínimo en todos los escenarios."
+    if night["status"] == "requires_change":
+        return message + " El plan vigente no alcanza el mínimo en todos los escenarios."
+    return message
+
+
 def tou_issue_text(payload, identity, result, forecast):
     lines = [f"**Simulación TOU · {payload['date']}**", "",
              "La aprobación registra una revisión de la simulación. La ejecución está deshabilitada.",
              f"Caduca {payload['expires_at']} · confianza {result['confidence']}"]
+    if "night_soc" in result:
+        lines += ["", night_soc_text(result["night_soc"])]
     strategies = result.get("strategies")
     if strategies:
         lines += ["", f"SOC medido {result['current_soc']:.1f} % · "

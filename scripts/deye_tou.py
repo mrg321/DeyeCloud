@@ -81,7 +81,7 @@ def hourly_steps(shares):
     return ((share, duration, index == len(shares) - 1) for index, share in enumerate(shares))
 
 
-def simulate(hours, periods, initial, limits, cfg, *, detail=False):
+def simulate(hours, periods, initial, limits, cfg, *, detail=False, checkpoint=None):
     capacity = cfg["battery_usable_kwh"]
     eta_c, eta_d = cfg["charge_efficiency"], cfg["discharge_efficiency"]
     floor, charge_kw, discharge_kw = limits
@@ -93,9 +93,10 @@ def simulate(hours, periods, initial, limits, cfg, *, detail=False):
     curve = []
     minimum = initial
     minimum_end = 100.
-    steps = ((row, share, fraction, last) for row in hours
+    checkpoint_soc = initial if checkpoint == 0 else None
+    steps = ((index, row, share, fraction, last) for index, row in enumerate(hours, 1)
              for share, fraction, last in hourly_steps(row.load_shares))
-    for row, share, fraction, last in steps:
+    for index, row, share, fraction, last in steps:
         period = periods[bisect_right(starts, row.hour) - 1]
         start_soc = 100 * energy / capacity
         target = capacity * max(floor, period.soc) / 100
@@ -122,6 +123,8 @@ def simulate(hours, periods, initial, limits, cfg, *, detail=False):
         minimum = min(minimum, end_soc)
         if last:
             minimum_end = min(minimum_end, end_soc)
+            if index == checkpoint:
+                checkpoint_soc = end_soc
         for key, value in zip(result, (cost - credit, cost, credit, load, pv, direct, solar, grid,
                                        discharge, imported, exported, surplus - solar - exported, loss,
                                        imported if row.band == "peak" else 0.)):
@@ -144,10 +147,12 @@ def simulate(hours, periods, initial, limits, cfg, *, detail=False):
     return {**result, "final_soc": 100 * energy / capacity, "minimum_soc": minimum,
             "minimum_hour_end_soc": minimum_end,
             "terminal_value_eur": terminal, "objective_eur": result["net_cost_eur"] - terminal,
-            **({"hours": curve} if detail else {})}
+            **({"hours": curve} if detail else {}),
+            **({"night_end_soc": checkpoint_soc} if checkpoint is not None else {})}
 
 
-def optimize(hours, current, initial, limits, cfg, *, night_hours, peak_hours_profile=None):
+def optimize(hours, current, initial, limits, cfg, *, night_hours, peak_hours_profile=None,
+             checkpoint=None, required_soc=None):
     """Coordinate search from current, tariff and night-only configurations."""
     scenarios = [hours] + [
         [replace(row, load=row.load * (1 + load * cfg["load_uncertainty"]),
@@ -157,18 +162,26 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours, peak_hours_pr
         scenarios.append([replace(row, pv=row.pv * (1 - cfg["pv_uncertainty"]))
                           for row in peak_hours_profile])
     minimum = ceil(max(limits[0], cfg["verified_device_minimum_soc"] or 0))
-    night_minimum = ceil(max(minimum, cfg["minimum_night_soc"]))
+    night_minimum = ceil(max(minimum, cfg["minimum_night_soc"] if required_soc is None else required_soc))
     targets = sorted({minimum, night_minimum, 100, *cfg["targets"]})
     cache = {}
 
     def evaluate(plan):
         if plan not in cache:
-            cache[plan] = [simulate(rows, plan, initial, limits, cfg) for rows in scenarios]
+            cache[plan] = [simulate(rows, plan, initial, limits, cfg, checkpoint=checkpoint)
+                           for rows in scenarios]
         return cache[plan]
+
+    def night_soc(plan):
+        return min(row["night_end_soc"] for row in evaluate(plan))
+
+    must_raise = checkpoint is not None and night_soc(current) + EPS < required_soc
 
     def score(plan):
         outcome = evaluate(plan)[0]
-        return (round(outcome["objective_eur"], 8), outcome["grid_charge_kwh"],
+        cost = outcome["net_cost_eur"] if must_raise else outcome["objective_eur"]
+        deficit = max(0., required_soc - night_soc(plan) - EPS) if must_raise else 0.
+        return (deficit, round(cost, 8), outcome["grid_charge_kwh"],
                 outcome["loss_kwh"], outcome["peak_import_kwh"], -outcome["solar_charge_kwh"],
                 sum(a != b for a, b in zip(current, plan)), plan)
 
@@ -181,7 +194,7 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours, peak_hours_pr
 
     def eligible(plan):
         if plan == current:
-            return True
+            return not must_raise
         if any(period.soc < minimum for period in plan):
             return False
         if peak_charge_windows(plan) - peak_charge_windows(current):
@@ -191,6 +204,15 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours, peak_hours_pr
         # that recover it within the first modeled hour without discharging.
         if min(row["minimum_hour_end_soc"] for row in outcomes) + EPS < limits[0]:
             return False
+        if checkpoint is not None:
+            if night_hours:
+                last_period = bisect_right([p.hour for p in plan], max(night_hours)) - 1
+                if plan[last_period].soc < night_minimum:
+                    return False
+            if night_soc(plan) + EPS < required_soc:
+                return False
+        if must_raise:
+            return True
         savings = [a["objective_eur"] - b["objective_eur"] for a, b in zip(reference, outcomes)]
         avoided = [a["grid_charge_kwh"] - b["grid_charge_kwh"] for a, b in zip(reference, outcomes)]
         invoice_savings = [a["net_cost_eur"] - b["net_cost_eur"] for a, b in zip(reference, outcomes)]
@@ -207,7 +229,7 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours, peak_hours_pr
             if soc >= night_minimum:
                 night_plans.add(tuple(replace(p, soc=soc, grid=True) if i in indices else p
                                        for i, p in enumerate(current)))
-    night = min(filter(eligible, night_plans), key=score)
+    night = min(filter(eligible, night_plans), key=score, default=current)
     tariff = [start for start, _, _ in cfg["weekday_periods"]]
     seeds = {current, night}
     if len(tariff) == 6:
@@ -243,17 +265,30 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours, peak_hours_pr
                 plan = min(options, key=score)
             if plan == previous:
                 break
-    full = min(filter(eligible, candidates), key=score)
-    return {"current": current, "night": night, "full": full}, len(cache)
+    full = min(filter(eligible, candidates), key=score, default=current)
+    plans = {"current": current, "night": night, "full": full}
+    constraint = {}
+    if checkpoint is not None:
+        constraint = {
+            "minimum_soc": required_soc,
+            "current_soc": reference[0]["night_end_soc"],
+            "proposed_soc": evaluate(full)[0]["night_end_soc"],
+            "current_worst_soc": night_soc(current),
+            "proposed_worst_soc": night_soc(full),
+            "status": ("unreachable" if full == current else "requires_change") if must_raise else "met",
+        }
+    return plans, len(cache), constraint
 
 
-def comparison(hours, current, initial, limits, config, *, night_hours, peak_hours_profile=None):
-    plans, evaluated = optimize(hours, current, initial, limits, config, night_hours=night_hours,
-                                peak_hours_profile=peak_hours_profile)
+def comparison(hours, current, initial, limits, config, *, night_hours, peak_hours_profile=None,
+               checkpoint=None, required_soc=None):
+    plans, evaluated, constraint = optimize(
+        hours, current, initial, limits, config, night_hours=night_hours,
+        peak_hours_profile=peak_hours_profile, checkpoint=checkpoint, required_soc=required_soc)
     results = {}
     for name, periods in plans.items():
         results[name] = {"periods": [period.record() for period in periods],
-                         **simulate(hours, periods, initial, limits, config, detail=True)}
+                         **simulate(hours, periods, initial, limits, config, detail=True, checkpoint=checkpoint)}
     baseline = results["current"]
     for result in results.values():
         for key in ("net_cost_eur", "objective_eur", "peak_import_kwh", "grid_charge_kwh", "loss_kwh"):
@@ -264,4 +299,5 @@ def comparison(hours, current, initial, limits, config, *, night_hours, peak_hou
                                     if row["hour"][11:16] == "18:00"), None)
         result["soc_at_22"] = next((row["soc_start"] for row in result["hours"]
                                     if row["hour"][11:16] == "22:00"), None)
-    return {"strategies": results, "evaluated_plans": evaluated}
+    return {"strategies": results, "evaluated_plans": evaluated,
+            **({"night_soc": constraint} if constraint else {})}

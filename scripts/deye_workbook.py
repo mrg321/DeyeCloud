@@ -114,6 +114,15 @@ def add_recommendation_sheet(workbook, report):
                      (f"{targets} — Cumulative saving vs current TOU (EUR)",
                       option.get("cumulative_saving_eur", option.get("saving_eur")))])
     phase3 = report.get("tou_simulation")
+    night = (phase3 or result).get("night_soc")
+    if night:
+        hour = "00:00 del día siguiente" if night["hour"] == 24 else f"{night['hour']:02d}:00"
+        band = {"valley": "valle", "flat": "llano", "peak": "punta"}.get(night["next_band"])
+        rows.extend([("Control del SOC al final de la noche", hour),
+                     ("Tarifa siguiente", band), ("Mínimo aplicable (%)", night["minimum_soc"]),
+                     ("SOC previsto con TOU vigente (%)", night["current_soc"]),
+                     ("SOC previsto con la alternativa (%)", night["proposed_soc"]),
+                     ("Estado del mínimo nocturno", night["status"])])
     if phase3:
         rows.extend([(), ("Simulación de seis periodos", phase3["decision_reason"]),
                      ("Confianza", phase3["confidence"]), ("SOC medido (%)", phase3.get("current_soc")),

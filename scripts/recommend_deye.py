@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from math import ceil
 from statistics import median
 from time import monotonic
 
@@ -27,6 +28,7 @@ TOU_TIMES = ("0000", "0500", "0800", "1300", "1700", "2100")
 ENERGY_FIELDS = ("Consumption", "Production", "ElectricityPurchasing", "GridFeed-in",
                  "ChargingCapacity", "DischargingCapacity")
 PREVIOUS_MINIMUM_NIGHT_SOC = 40
+NIGHT_SOC_KEYS = ("minimum_night_soc_next_non_valley", "minimum_night_soc_next_valley")
 
 
 def settings(override=None, *, require_installation=False):
@@ -70,6 +72,7 @@ def settings(override=None, *, require_installation=False):
     if (config["battery_usable_kwh"] > config["battery_nominal_kwh"] or type(targets) is not list or not targets
             or not all(type(x) is int and 0 <= x <= 100 for x in targets)
             or not bounded(config["minimum_night_soc"], 0, 100)
+            or any(config[key] is not None and not bounded(config[key], 0, 100) for key in NIGHT_SOC_KEYS)
             or (config["verified_device_minimum_soc"] is not None
                 and not bounded(config["verified_device_minimum_soc"], 0, 100))
             or targets != sorted(set(targets)) or config["fallback"] not in ("hold", "abstain")
@@ -332,7 +335,7 @@ def import_price(hour, kind, config):
     return config["prices"][tariff_band(hour, kind, config)]
 
 
-def night_soc_limits(snapshot, config):
+def night_soc_limits(snapshot, config, configured_minimum):
     """Use live protections as additional bounds, with explicit TOU/BMS confirmation for lower targets."""
     battery = snapshot.get("parameters", {}).get("deye_read_battery_settings") or {}
     data = battery.get("data") or {}
@@ -340,7 +343,7 @@ def night_soc_limits(snapshot, config):
     available = battery.get("status") == "available"
     valid = (available and type(shutdown) is int and type(low) is int and 0 <= shutdown <= low < 100)
     verified = config["verified_device_minimum_soc"]
-    minimum = max(config["reserve_soc"], config["minimum_night_soc"], verified or 0)
+    minimum = max(config["reserve_soc"], configured_minimum, verified or 0)
     if valid:
         minimum = max(minimum, low + 1)
     if not valid or verified is None:
@@ -349,13 +352,14 @@ def night_soc_limits(snapshot, config):
     return minimum, valid and not conflict and verified is not None, conflict
 
 
-def simulate(hours, load, pv, initial, targets, kind, config, *, profile=None):
+def simulate(hours, load, pv, initial, targets, kind, config, *, profile=None, night_end=8):
     capacity = config["battery_usable_kwh"]
     battery = initial * capacity / 100
     minimum_battery_after_first_slot = capacity
     charge_eff, discharge_eff = config["charge_efficiency"], config["discharge_efficiency"]
     power = config["battery_kw"]
     cost = imports = exports = grid_charge = discharge = daytime_discharge = direct_pv = pv_charge = 0.0
+    night_end_soc = initial
     steps = ((hour, demand * share, production * duration, duration, last)
              for hour, demand, production in zip(hours, load, pv)
              for share, duration, last in hourly_steps(profile.shares(hour) if profile is not None else ()))
@@ -378,6 +382,8 @@ def simulate(hours, load, pv, initial, targets, kind, config, *, profile=None):
         battery -= delivered / discharge_eff
         # Keep numerical drift from producing negative charge headroom.
         battery = min(capacity, battery)
+        if last and hour < night_end:
+            night_end_soc = battery / capacity * 100
         # The first slot ends at 05:00. Check its achieved charge and every subsequent hour.
         if hour > 4 or (hour == 4 and last):
             minimum_battery_after_first_slot = min(minimum_battery_after_first_slot, battery)
@@ -393,6 +399,7 @@ def simulate(hours, load, pv, initial, targets, kind, config, *, profile=None):
             "grid_to_battery_kwh": grid_charge, "pv_to_battery_kwh": pv_charge,
             "battery_start_kwh": initial * capacity / 100, "battery_end_kwh": battery,
             "minimum_soc_from_05": minimum_battery_after_first_slot / capacity * 100,
+            "night_end_soc": night_end_soc,
             "battery_charge_loss_kwh": (grid_charge + pv_charge) * (1 - charge_eff),
             "battery_discharge_loss_kwh": discharge * (1 / discharge_eff - 1),
             "direct_pv_self_consumption_kwh": direct_pv, "battery_output_kwh": discharge,
@@ -401,12 +408,19 @@ def simulate(hours, load, pv, initial, targets, kind, config, *, profile=None):
 
 def recommendation(target, now, weather, selected, snapshot, config):
     soc, baseline, soc_time = evening_state(snapshot, now, config)
-    night_minimum, lower_targets_verified, invalid_protection = night_soc_limits(snapshot, config)
+    night_end, next_band, configured_minimum = night_soc_policy(target, config)
+    night_minimum, lower_targets_verified, invalid_protection = night_soc_limits(
+        snapshot, config, configured_minimum)
     backup_required = bool(config["backup_reserve_soc"] or config["backup_autonomy_kwh"])
     backup_floor = max(config["backup_reserve_soc"], config["reserve_soc"] +
                        100 * config["backup_autonomy_kwh"] /
                        (config["battery_usable_kwh"] * config["discharge_efficiency"]))
     kind = day_type(target, config)
+    # The legacy 40% rule limits new targets when protections are unverified.
+    # It does not by itself require changing an existing plan.
+    required_soc = max(configured_minimum, backup_floor, config["verified_device_minimum_soc"] or 0)
+    if lower_targets_verified:
+        required_soc = max(required_soc, night_minimum)
     stamps = hour_starts(target)
     hours = [datetime.fromtimestamp(stamp, MADRID).hour for stamp in stamps]
     profile, peak_profile = consumption_profiles(selected) if selected else (None, None)
@@ -467,12 +481,14 @@ def recommendation(target, now, weather, selected, snapshot, config):
     if peak_profile is not None:
         scenarios.append((peak_profile, 1, 1 - config["pv_uncertainty"]))
     outcomes = {}
-    candidates = [(x, x) for x in config["targets"] if x >= config["reserve_soc"]]
+    candidates = [(x, x) for x in sorted({*config["targets"], ceil(max(night_minimum, required_soc))})
+                  if x >= config["reserve_soc"]]
     for setting in dict.fromkeys([tuple(baseline)] + candidates):
         outcomes[setting] = [simulate(hours, [shape[h] * lf for h in hours], [x * pf for x in pv],
-                                      initial, setting, kind, config, profile=shape)
+                                      initial, setting, kind, config, profile=shape, night_end=night_end)
                              for shape, lf, pf in scenarios]
     reference = outcomes[tuple(baseline)]
+    current_meets_night = min(row["night_end_soc"] for row in reference) + 1e-9 >= required_soc
     comparable_season = (target.month % 12) // 3
     same_type_season = sum(day_type(row[0], config) == kind and (row[0].month % 12) // 3 == comparable_season
                            for row in selected)
@@ -494,6 +510,7 @@ def recommendation(target, now, weather, selected, snapshot, config):
         avoided_losses = sum(reference[0][key] - central[key] for key in losses)
         minimum_soc = min(row["minimum_soc_from_05"] for row in outcomes_by_scenario)
         backup_ok = not backup_required or min(min(setting), minimum_soc) + 1e-9 >= backup_floor
+        meets_night = min(row["night_end_soc"] for row in outcomes_by_scenario) + 1e-9 >= required_soc
         increases = any(candidate > current for candidate, current in zip(setting, baseline))
         reduces = setting != tuple(baseline) and not increases
         policy_reason = None
@@ -503,6 +520,10 @@ def recommendation(target, now, weather, selected, snapshot, config):
             elif min(setting) < night_minimum:
                 policy_reason = ("LOW_SOC_LIMITS_UNVERIFIED" if not lower_targets_verified
                                  and min(setting) < PREVIOUS_MINIMUM_NIGHT_SOC else "MINIMUM_SOC_NOT_MET")
+            elif not meets_night:
+                policy_reason = "NIGHT_SOC_UNREACHABLE"
+            elif not current_meets_night:
+                policy_reason = "NIGHT_SOC_MINIMUM_REQUIRES_CHANGE"
             elif increases and flat_price is not None:
                 policy_reason = "FLAT_TARIFF_NO_GRID_ARBITRAGE"
             elif reduces and min(avoided) + 1e-9 < minimum_grid_reduction:
@@ -520,7 +541,8 @@ def recommendation(target, now, weather, selected, snapshot, config):
     optimal = min(options, key=lambda row: row["cost_eur"])
     economic = [row for row in options if row["policy_reason"] == "ROBUST_SAVING_MEETS_THRESHOLD"]
     reductions = [row for row in options if row["policy_reason"] == "AVOID_UNNECESSARY_GRID_CHARGING"]
-    viable = economic or reductions
+    mandatory = [row for row in options if row["policy_reason"] == "NIGHT_SOC_MINIMUM_REQUIRES_CHANGE"]
+    viable = mandatory or economic or reductions
     best = min(viable, key=lambda row: (row["cost_eur"], -row["avoided_grid_charge_kwh"])) if viable else options[0]
     targets = best["targets"]
     gross = optimal["saving_eur"]
@@ -528,6 +550,12 @@ def recommendation(target, now, weather, selected, snapshot, config):
     if reasons:
         decision_reason = reasons[0]
         justification = "Hay perfiles para estimar costes, pero no se alcanza el mínimo para proponer un cambio."
+    elif mandatory:
+        decision_reason = "NIGHT_SOC_MINIMUM_REQUIRES_CHANGE"
+        justification = "El plan vigente no alcanza el mínimo nocturno. Se propone la alternativa viable de menor coste."
+    elif not current_meets_night:
+        decision_reason = "NIGHT_SOC_UNREACHABLE"
+        justification = "Ninguna alternativa evaluada alcanza el mínimo nocturno en todos los escenarios."
     elif viable:
         decision_reason = best["policy_reason"]
         if economic:
@@ -571,6 +599,11 @@ def recommendation(target, now, weather, selected, snapshot, config):
                    "avoided_grid_charge_kwh": best["avoided_grid_charge_kwh"],
                    "avoided_conversion_loss_kwh": best["avoided_conversion_loss_kwh"],
                    "minimum_avoided_grid_charge_kwh": minimum_grid_reduction,
+                   "night_soc": {"hour": night_end, "next_band": next_band, "minimum_soc": required_soc,
+                                 "current_soc": reference[0]["night_end_soc"],
+                                 "proposed_soc": best["night_end_soc"],
+                                 "status": "unverified" if reasons else
+                                 "met" if current_meets_night else "requires_change" if mandatory else "unreachable"},
                    "maximum_grid_reduction_cost_increase_eur": max_extra_cost,
                    "backup_minimum_soc": backup_floor if backup_required else None,
                    "estimated_midnight_soc": initial, "projected_precharge_battery_output_kwh": projected_discharge,
@@ -611,8 +644,18 @@ def tou_hours(day, profile, weather, config):
 
 
 def night_window(config):
-    return {hour for start, end, band in config["weekday_periods"]
-            if start == 0 and band == "valley" for hour in range(start, end)}
+    end = next((start for start, _, band in config["weekday_periods"] if band != "valley"), 24)
+    return set(range(end))
+
+
+def night_soc_policy(day, config):
+    end = len(night_window(config))
+    next_day = day + timedelta(days=1) if end == 24 else day
+    kind = day_type(next_day, config)
+    band = tariff_band(end % 24, kind, config) if kind is not None else None
+    key = NIGHT_SOC_KEYS[1 if band == "valley" else 0]
+    minimum = config[key] if band is not None else None
+    return end, band, config["minimum_night_soc"] if minimum is None else minimum
 
 
 def replay_tou_day(day, daily, intraday, reference_snapshot, config):
@@ -703,8 +746,13 @@ def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetc
         except (requests.RequestException, ValueError, KeyError, TypeError, IndexError):
             issues.append("SECOND_DAY_FORECAST_UNAVAILABLE")
 
+    night_end, next_band, configured_minimum = night_soc_policy(target, config)
+    required_soc = max(configured_minimum, limits[0], config["verified_device_minimum_soc"] or 0)
+    checkpoint = sum(row.stamp[:10] == str(target) and row.hour < night_end for row in hours)
     outcome = comparison(hours, periods, initial, limits, config, night_hours=night_window(config),
-                         peak_hours_profile=peak_hours)
+                         peak_hours_profile=peak_hours, checkpoint=checkpoint, required_soc=required_soc)
+    night = outcome["night_soc"]
+    night.update(hour=night_end, next_band=next_band)
     reference, proposed = (outcome["strategies"][key] for key in ("current", "full"))
     changes = []
     for index, (before, after) in enumerate(zip(reference["periods"], proposed["periods"]), 1):
@@ -736,7 +784,10 @@ def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetc
                            and comparable >= config["min_profiles"] else "low"),
             "snapshot_sha256": hashlib.sha256(canonical(snapshot["parameters"])).hexdigest(),
             "changes": changes, "decision": "review" if changes else "hold",
-            "decision_reason": "SIMULATED_TOU_CHANGE" if changes else "NO_ROBUST_TOU_CHANGE",
+            "decision_reason": {
+                "requires_change": "NIGHT_SOC_MINIMUM_REQUIRES_CHANGE",
+                "unreachable": "NIGHT_SOC_UNREACHABLE",
+            }.get(night["status"], "SIMULATED_TOU_CHANGE" if changes else "NO_ROBUST_TOU_CHANGE"),
             "evening": {"load_kwh": sum(row.load for row in evening), "pv_kwh": sum(row.pv for row in evening),
                         "deficit_kwh": deficit, "required_start_soc": evening_required,
                         "extra_flat_import_cost_eur": sum(
@@ -763,7 +814,13 @@ def run(store, now, *, dry_run=False, recalculate=False, fetch=forecast):
                 store.publish({workbook_path: updated})
                 return "WORKBOOK_UPDATED"
         return "ALREADY_RECORDED"
-    config = settings(store.read("config/recommendation.json"), require_installation=True)
+    installation = store.read("config/recommendation.json")
+    night_settings = store.read("config/night_soc.json")
+    if night_settings is not None:
+        if not isinstance(night_settings, dict) or night_settings.keys() - set(NIGHT_SOC_KEYS):
+            raise ValueError("INVALID_NIGHT_SOC_SETTINGS")
+        installation = {**(installation or {}), **night_settings}
+    config = settings(installation, require_installation=True)
     snapshot = store.read(f"evening/{today}.json") or {}
     selected = history(store, target, config)
     try:

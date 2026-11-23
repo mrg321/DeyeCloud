@@ -85,6 +85,27 @@ class TouTests(TestCase):
         self.assertAlmostEqual(row["soc_start"], 50)
         self.assertAlmostEqual(row["soc_end"], detailed["final_soc"])
 
+    def test_night_soc_bypasses_savings_but_not_charge_power(self):
+        self.config.update(minimum_saving_eur=10, minimum_night_soc_next_non_valley=35,
+                           minimum_night_soc_next_valley=30)
+        for day, grid_kw, expected, minimum in (
+                (self.day, 5.75, "requires_change", 35),
+                (self.day, 0.1, "unreachable", 35),
+                (date(2026, 12, 8), 5.75, "met", 30)):
+            with self.subTest(day=day, grid_kw=grid_kw):
+                profiles = [(day - timedelta(days=delta), [1] * 24, {}) for delta in (7, 14, 21)]
+                result = tou_recommendation(day, self.now, weather(day), profiles, snapshot(self.now, 30),
+                                            dict(self.config, grid_kw=grid_kw), fetch=weather)
+                night = result["night_soc"]
+                self.assertEqual(night["status"], expected)
+                self.assertEqual(night["minimum_soc"], minimum)
+                self.assertEqual(night["hour"], 8)
+                self.assertEqual(result["decision"], "review" if expected == "requires_change" else "hold")
+                if expected == "requires_change":
+                    self.assertGreaterEqual(night["proposed_worst_soc"] + 1e-9, minimum)
+                    self.assertLess(result["strategies"]["full"]["avoided_net_cost_eur"],
+                                    self.config["minimum_saving_eur"])
+
     def test_weekend_uniform_and_sunny(self):
         for sunny in (True, False):
             with self.subTest(sunny=sunny):
