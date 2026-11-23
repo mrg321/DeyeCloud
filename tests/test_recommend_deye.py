@@ -268,6 +268,21 @@ class ReadOnlyRecommendationTests(unittest.TestCase):
         del entries[f"daily/{day}.json"]["energy"]["device"]["Consumption"]
         self.assertEqual(history(Store(entries), TARGET, settings()), [])
 
+    def test_historical_shape_retains_a_short_morning_peak(self):
+        day = TARGET - timedelta(days=2)
+        points = samples(day)
+        for point in points[8 * 12 + 4:8 * 12 + 6]:
+            point["value"] = 6000
+        peaked = load_profile(points, day, 24)
+        typical = load_profile(samples(day), day, 24)
+        profile, stress = recommend_deye.consumption_profiles(
+            [(day, typical, {}), (day, typical, {}), (day, peaked, {})])
+
+        self.assertAlmostEqual(profile[8], typical[8])
+        self.assertIs(stress, peaked)
+        self.assertAlmostEqual(sum(stress.quarters[8]), stress[8])
+        self.assertGreater(stress.shares(8)[1], 0.5)
+
     def test_cloud_high_load_vs_sun_low_load(self):
         config = settings()
         cloudy = recommendation(TARGET, NOW, solar(0), profiles(1.5), snapshot(), config)

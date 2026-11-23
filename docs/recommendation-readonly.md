@@ -133,6 +133,13 @@ para evaluarlo. El TOU actual se simula como referencia aunque supere el 80 %.
   hora. Se contrasta el resultado con el campo diario `Consumption` y se ajusta
   a ese total si la diferencia está dentro del 35 %. Importación, generación,
   carga y descarga se conservan como magnitudes independientes.
+  La simulación reparte la mediana de cada hora según el perfil de 15 minutos
+  de un día histórico cercano a la mediana y prueba también el día comparable
+  con el mayor pico entre las 05:00 y las 12:00, junto con el escenario de FV
+  baja. Cada cuarto requiere al menos diez minutos cubiertos por muestras. Si
+  falta cobertura en algún cuarto, esa hora se simula en un único paso. La FV
+  prevista se reparte uniformemente dentro de la hora y el informe sigue
+  mostrando totales horarios.
 - Se parte de un SOC reciente y se estima el SOC de medianoche descontando el
   consumo previsto hasta esa hora. Se simulan carga nocturna, autoconsumo
   directo, carga solar, descarga, importación y exportación. Se consideran
@@ -236,7 +243,7 @@ Se evalúan el escenario central y cuatro combinaciones de incertidumbre de FV y
 | `tou_export_limit_kw` | `0` | Límite de exportación FV simulado |
 | `tou_credit_export` | `false` | Valora el excedente FV a `export_price` cuando el contrato y el modo lo permiten |
 
-La reserva, la autonomía de respaldo, los objetivos discretos, las eficiencias, las tarifas, el calendario y los márgenes de previsión se toman de la configuración de recomendación existente. La potencia de batería se limita además por las corrientes configuradas leídas. Esas corrientes no reflejan necesariamente la limitación instantánea del BMS por tensión, temperatura o estado de carga. La simulación aproxima flujos horarios y no modela picos dentro de la hora, recuperaciones autónomas de seguridad ni venta desde batería. La compensación fija opcional no incorpora límites mensuales, impuestos ni batería virtual. Debe permanecer deshabilitada cuando esas reglas puedan afectar a la decisión.
+La reserva, la autonomía de respaldo, los objetivos discretos, las eficiencias, las tarifas, el calendario y los márgenes de previsión se toman de la configuración de recomendación existente. La potencia de batería se limita además por las corrientes configuradas leídas. Esas corrientes no reflejan necesariamente la limitación instantánea del BMS por tensión, temperatura o estado de carga. La simulación aplica los límites de potencia en pasos de 15 minutos cuando el perfil histórico tiene cobertura suficiente. Los picos más breves se promedian dentro de cada paso. El modelo tampoco incluye recuperaciones autónomas de seguridad ni venta desde batería. La compensación fija opcional no incorpora límites mensuales, impuestos ni batería virtual. Debe permanecer deshabilitada cuando esas reglas puedan afectar a la decisión.
 
 Solo se simulan cambios en inicio, SOC y Grid Charge. Los seis inicios se interpretan como un ciclo continuo. La última fila acaba en el primer inicio del siguiente día, incluida la representación de medianoche como `0000` en el modelo. Las capturas con granularidad inferior a una hora o con generador se descartan. El fabricante documenta `Power` como un máximo de descarga, por lo que se usa como límite leído y se mantiene fijo por fila. Sell, modo de trabajo, parámetros de seguridad, corrientes y red quedan fuera de los planes. Las lecturas públicas del API y la captura privada permiten confirmar los campos devueltos, pero no verifican el comportamiento de la versión instalada al cambiar parámetros durante un periodo activo.
 

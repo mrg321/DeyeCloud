@@ -72,6 +72,13 @@ class Hour:
     price: float
     band: str
     duration: float = 1
+    load_shares: tuple[float, ...] = ()
+
+
+def hourly_steps(shares):
+    shares = shares or (1.,)
+    duration = 1 / len(shares)
+    return ((share, duration, index == len(shares) - 1) for index, share in enumerate(shares))
 
 
 def simulate(hours, periods, initial, limits, cfg, *, detail=False):
@@ -86,41 +93,49 @@ def simulate(hours, periods, initial, limits, cfg, *, detail=False):
     curve = []
     minimum = initial
     minimum_end = 100.
-    for row in hours:
+    steps = ((row, share, fraction, last) for row in hours
+             for share, fraction, last in hourly_steps(row.load_shares))
+    for row, share, fraction, last in steps:
         period = periods[bisect_right(starts, row.hour) - 1]
         start_soc = 100 * energy / capacity
         target = capacity * max(floor, period.soc) / 100
-        direct = min(row.load, row.pv)
-        demand, surplus = row.load - direct, row.pv - direct
-        headroom = charge_kw * row.duration
+        load, pv, duration = row.load * share, row.pv * fraction, row.duration * fraction
+        direct = min(load, pv)
+        demand, surplus = load - direct, pv - direct
+        headroom = charge_kw * duration
         solar = min(surplus, headroom, max(0., capacity - energy) / eta_c)
         energy += solar * eta_c
-        discharge = min(demand, min(discharge_kw, period.power / 1000) * row.duration,
+        discharge = min(demand, min(discharge_kw, period.power / 1000) * duration,
                         max(0., energy - target) * eta_d)
         energy -= discharge / eta_d
         grid = 0.
         if period.grid and discharge <= EPS:
             grid = min(max(0., target - energy) / eta_c, headroom - solar,
-                       max(0., cfg["grid_kw"] * row.duration - demand))
+                       max(0., cfg["grid_kw"] * duration - demand))
         energy += grid * eta_c
         imported = demand - discharge + grid
-        exported = min(surplus - solar, cfg["tou_export_limit_kw"] * row.duration)
+        exported = min(surplus - solar, cfg["tou_export_limit_kw"] * duration)
         credit = exported * (cfg["export_price"] if cfg["tou_credit_export"] else 0.)
         cost = imported * row.price
         loss = (solar + grid) * (1 - eta_c) + discharge * (1 / eta_d - 1)
         end_soc = 100 * energy / capacity
         minimum = min(minimum, end_soc)
-        minimum_end = min(minimum_end, end_soc)
-        for key, value in zip(result, (cost - credit, cost, credit, row.load, row.pv, direct, solar, grid,
+        if last:
+            minimum_end = min(minimum_end, end_soc)
+        for key, value in zip(result, (cost - credit, cost, credit, load, pv, direct, solar, grid,
                                        discharge, imported, exported, surplus - solar - exported, loss,
                                        imported if row.band == "peak" else 0.)):
             result[key] += value
         if detail:
-            curve.append({"hour": row.stamp, "load_kwh": row.load, "pv_kwh": row.pv,
-                          "soc_start": start_soc, "soc_end": end_soc, "import_kwh": imported,
-                          "export_kwh": exported, "direct_pv_kwh": direct, "solar_charge_kwh": solar,
-                          "grid_charge_kwh": grid, "discharge_kwh": discharge, "loss_kwh": loss,
-                          "band": row.band, "price": row.price, "cost_eur": cost - credit})
+            if not curve or curve[-1]["hour"] != row.stamp:
+                curve.append({"hour": row.stamp, "soc_start": start_soc, "band": row.band, "price": row.price})
+            hour = curve[-1]
+            hour["soc_end"] = end_soc
+            for key, value in (("load_kwh", load), ("pv_kwh", pv), ("import_kwh", imported),
+                               ("export_kwh", exported), ("direct_pv_kwh", direct), ("solar_charge_kwh", solar),
+                               ("grid_charge_kwh", grid), ("discharge_kwh", discharge), ("loss_kwh", loss),
+                               ("cost_eur", cost - credit)):
+                hour[key] = hour.get(key, 0.) + value
     # Value usable energy at configured replacement cost. Keep invoice estimate separate.
     terminal_price = cfg["tou_terminal_eur_per_kwh"]
     if terminal_price is None:
@@ -132,12 +147,15 @@ def simulate(hours, periods, initial, limits, cfg, *, detail=False):
             **({"hours": curve} if detail else {})}
 
 
-def optimize(hours, current, initial, limits, cfg, *, night_hours):
+def optimize(hours, current, initial, limits, cfg, *, night_hours, peak_hours_profile=None):
     """Coordinate search from current, tariff and night-only configurations."""
     scenarios = [hours] + [
         [replace(row, load=row.load * (1 + load * cfg["load_uncertainty"]),
                  pv=row.pv * (1 + sun * cfg["pv_uncertainty"])) for row in hours]
         for load in (-1, 1) for sun in (-1, 1)]
+    if peak_hours_profile is not None:
+        scenarios.append([replace(row, pv=row.pv * (1 - cfg["pv_uncertainty"]))
+                          for row in peak_hours_profile])
     minimum = ceil(max(limits[0], cfg["verified_device_minimum_soc"] or 0))
     night_minimum = ceil(max(minimum, cfg["minimum_night_soc"]))
     targets = sorted({minimum, night_minimum, 100, *cfg["targets"]})
@@ -229,8 +247,9 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours):
     return {"current": current, "night": night, "full": full}, len(cache)
 
 
-def comparison(hours, current, initial, limits, config, *, night_hours):
-    plans, evaluated = optimize(hours, current, initial, limits, config, night_hours=night_hours)
+def comparison(hours, current, initial, limits, config, *, night_hours, peak_hours_profile=None):
+    plans, evaluated = optimize(hours, current, initial, limits, config, night_hours=night_hours,
+                                peak_hours_profile=peak_hours_profile)
     results = {}
     for name, periods in plans.items():
         results[name] = {"periods": [period.record() for period in periods],

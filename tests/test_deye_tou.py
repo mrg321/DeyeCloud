@@ -67,6 +67,24 @@ class TouTests(TestCase):
         self.assertNotEqual(current["periods"], full["periods"])
         self.assertEqual(len(full["periods"]), 6)
 
+    def test_quarter_hour_peak_can_import_despite_hourly_solar_surplus(self):
+        stamp = "2026-11-23T10:00:00+01:00"
+        flat = Hour(stamp, 10, 2, 3, 0.193, "peak")
+        peaked = Hour(stamp, 10, 2, 3, 0.193, "peak", load_shares=(1, 0, 0, 0))
+        hourly = simulate([flat], self.periods, 50, self.limits, self.config, detail=True)
+        detailed = simulate([peaked], self.periods, 50, self.limits, self.config, detail=True)
+
+        self.assertAlmostEqual(hourly["import_kwh"], 0)
+        self.assertAlmostEqual(detailed["import_kwh"], 0.25)
+        self.assertEqual(len(detailed["hours"]), 1)
+        row = detailed["hours"][0]
+        self.assertEqual(row["hour"], stamp)
+        self.assertAlmostEqual(row["load_kwh"], 2)
+        self.assertAlmostEqual(row["pv_kwh"], 3)
+        self.assertAlmostEqual(row["discharge_kwh"], 1)
+        self.assertAlmostEqual(row["soc_start"], 50)
+        self.assertAlmostEqual(row["soc_end"], detailed["final_soc"])
+
     def test_weekend_uniform_and_sunny(self):
         for sunny in (True, False):
             with self.subTest(sunny=sunny):

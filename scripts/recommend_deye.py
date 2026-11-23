@@ -14,7 +14,7 @@ import requests
 from deye_history_quality import MADRID, day_bounds, numeric, sample_time
 from deye_private_store import ApprovalWorkflowMissing, GitHubPrivateStore, canonical
 from deye_workbook import add_recommendation_sheet
-from deye_tou import Hour, comparison, model_limits, read_periods, simulate as simulate_tou
+from deye_tou import Hour, comparison, hourly_steps, model_limits, read_periods, simulate as simulate_tou
 
 
 UTC = timezone.utc
@@ -157,6 +157,17 @@ def day_type(day, config):
     return "weekend" if day.weekday() >= 5 else "weekday"
 
 
+class LoadProfile(list):
+    """Hourly totals with optional quarter-hour energy for each hour."""
+
+    def __init__(self, hourly, quarters):
+        super().__init__(hourly)
+        self.quarters = quarters
+
+    def shares(self, hour):
+        return tuple(value / self[hour] for value in self.quarters[hour]) if self[hour] else ()
+
+
 def load_profile(samples, day, consumption, *, power_key="TotalConsumptionPower"):
     """Integrate valid short power spans, then normalize to a measured daily total."""
     hours = hour_starts(day)
@@ -173,7 +184,7 @@ def load_profile(samples, day, consumption, *, power_key="TotalConsumptionPower"
                 or unit not in ("W", "kW") or value is None or value < 0):
             return None
         points[stamp.timestamp()] = value / 1000 if unit == "W" else value
-    energy, duration = [0.0] * 24, [0.0] * 24
+    energy, duration = [0.0] * 96, [0.0] * 96
     ordered = sorted(points.items())
     for (left, a), (right, b) in zip(ordered, ordered[1:]):
         if right - left > 600:
@@ -181,19 +192,45 @@ def load_profile(samples, day, consumption, *, power_key="TotalConsumptionPower"
         slope = (b - a) / (right - left)
         origin = left
         while left < right:
-            hour = int((left - start) // 3600)
-            stop = min(right, start + (hour + 1) * 3600)
+            quarter = int((left - start) // 900)
+            stop = min(right, start + (quarter + 1) * 900)
             mean_power = a + slope * ((left - origin) + (stop - origin)) / 2
-            energy[hour] += mean_power * (stop - left) / 3600
-            duration[hour] += stop - left
+            energy[quarter] += mean_power * (stop - left) / 3600
+            duration[quarter] += stop - left
             left = stop
-    if min(duration) < 2700:
+    hourly_duration = [sum(duration[i:i + 4]) for i in range(0, 96, 4)]
+    if min(hourly_duration) < 2700:
         return None
-    estimated = [value * 3600 / covered for value, covered in zip(energy, duration)]
+    estimated = [sum(energy[i:i + 4]) * 3600 / covered
+                 for i, covered in zip(range(0, 96, 4), hourly_duration)]
     total = sum(estimated)
     if total <= 0 or not 0.65 <= total / consumption <= 1.35:
         return None
-    return [value * consumption / total for value in estimated]
+    hourly = [value * consumption / total for value in estimated]
+    quarters = []
+    for i, value in zip(range(0, 96, 4), hourly):
+        covered = duration[i:i + 4]
+        parts = [e / seconds for e, seconds in zip(energy[i:i + 4], covered)] if min(covered) >= 600 else []
+        subtotal = sum(parts)
+        quarters.append(tuple(value * part / subtotal for part in parts) if subtotal else ())
+    return LoadProfile(hourly, quarters)
+
+
+def consumption_profiles(selected):
+    """Preserve the hourly median and use coherent historical shapes for short peaks."""
+    profiles = [row[1] for row in selected]
+    hourly = [median(profile[h] for profile in profiles) for h in range(24)]
+    detailed = [profile for profile in profiles if any(getattr(profile, "quarters", ()))]
+    if not detailed:
+        return LoadProfile(hourly, [()] * 24), None
+    typical = min(detailed, key=lambda profile: sum(abs(a - b) for a, b in zip(profile, hourly)))
+    peak = max(detailed, key=lambda profile: (
+        max((value for parts in profile.quarters[5:12] for value in parts), default=0),
+        sum(profile[5:12]),
+    ))
+    quarters = [tuple(value * target / original for value in parts) if original else ()
+                for parts, target, original in zip(typical.quarters, hourly, typical)]
+    return LoadProfile(hourly, quarters), peak
 
 
 def history(store, target, config):
@@ -300,18 +337,22 @@ def night_soc_limits(snapshot, config):
     return minimum, valid and not conflict and verified is not None, conflict
 
 
-def simulate(hours, load, pv, initial, targets, kind, config):
+def simulate(hours, load, pv, initial, targets, kind, config, *, profile=None):
     capacity = config["battery_usable_kwh"]
     battery = initial * capacity / 100
     minimum_battery_after_first_slot = capacity
     charge_eff, discharge_eff = config["charge_efficiency"], config["discharge_efficiency"]
     power = config["battery_kw"]
     cost = imports = exports = grid_charge = discharge = daytime_discharge = direct_pv = pv_charge = 0.0
-    for hour, demand, production in zip(hours, load, pv):
+    steps = ((hour, demand * share, production * duration, duration, last)
+             for hour, demand, production in zip(hours, load, pv)
+             for share, duration, last in hourly_steps(profile.shares(hour) if profile is not None else ()))
+    for hour, demand, production, duration, last in steps:
+        step_power = power * duration
         direct_pv += min(demand, production)
         deficit = max(0, demand - production)
         surplus = max(0, production - demand)
-        solar_input = min(surplus, power, (capacity - battery) / charge_eff)
+        solar_input = min(surplus, step_power, (capacity - battery) / charge_eff)
         battery += solar_input * charge_eff
         pv_charge += solar_input
         floor = config["reserve_soc"]
@@ -319,14 +360,14 @@ def simulate(hours, load, pv, initial, targets, kind, config):
         if hour < 8:
             floor = targets[0 if hour < 5 else 1]
             grid_input = min(max(0, (floor * capacity / 100 - battery) / charge_eff),
-                             power - solar_input, max(0, config["grid_kw"] - deficit))
+                             step_power - solar_input, max(0, config["grid_kw"] * duration - deficit))
             battery += grid_input * charge_eff
-        delivered = min(deficit, power, max(0, battery - floor * capacity / 100) * discharge_eff)
+        delivered = min(deficit, step_power, max(0, battery - floor * capacity / 100) * discharge_eff)
         battery -= delivered / discharge_eff
         # Keep numerical drift from producing negative charge headroom.
         battery = min(capacity, battery)
         # The first slot ends at 05:00. Check its achieved charge and every subsequent hour.
-        if hour >= 4:
+        if hour > 4 or (hour == 4 and last):
             minimum_battery_after_first_slot = min(minimum_battery_after_first_slot, battery)
         bought, sold = deficit - delivered + grid_input, surplus - solar_input
         imports += bought
@@ -356,7 +397,7 @@ def recommendation(target, now, weather, selected, snapshot, config):
     kind = day_type(target, config)
     stamps = hour_starts(target)
     hours = [datetime.fromtimestamp(stamp, MADRID).hour for stamp in stamps]
-    profile = [median(row[1][h] for row in selected) for h in range(24)] if selected else None
+    profile, peak_profile = consumption_profiles(selected) if selected else (None, None)
     load = [profile[h] for h in hours] if profile else None
     historical = {}
     for key in ENERGY_FIELDS:
@@ -408,14 +449,17 @@ def recommendation(target, now, weather, selected, snapshot, config):
     remaining += sum(min(value, config["battery_kw"]) for value in profile[local.hour + 1:])
     projected_discharge = min(remaining, available * config["discharge_efficiency"])
     initial = soc - projected_discharge / config["discharge_efficiency"] / config["battery_usable_kwh"] * 100
-    scenarios = [(1, 1)] + [(1 + load_sign * config["load_uncertainty"],
-                             1 + pv_sign * config["pv_uncertainty"])
+    scenarios = [(profile, 1, 1)] + [(profile, 1 + load_sign * config["load_uncertainty"],
+                                     1 + pv_sign * config["pv_uncertainty"])
                             for load_sign in (-1, 1) for pv_sign in (-1, 1)]
+    if peak_profile is not None:
+        scenarios.append((peak_profile, 1, 1 - config["pv_uncertainty"]))
     outcomes = {}
     candidates = [(x, x) for x in config["targets"] if x >= config["reserve_soc"]]
     for setting in dict.fromkeys([tuple(baseline)] + candidates):
-        outcomes[setting] = [simulate(hours, [x * lf for x in load], [x * pf for x in pv],
-                                      initial, setting, kind, config) for lf, pf in scenarios]
+        outcomes[setting] = [simulate(hours, [shape[h] * lf for h in hours], [x * pf for x in pv],
+                                      initial, setting, kind, config, profile=shape)
+                             for shape, lf, pf in scenarios]
     reference = outcomes[tuple(baseline)]
     comparable_season = (target.month % 12) // 3
     same_type_season = sum(day_type(row[0], config) == kind and (row[0].month % 12) // 3 == comparable_season
@@ -548,7 +592,9 @@ def tou_hours(day, profile, weather, config):
         if row.get("hour") != stamp.isoformat() or pv is None or pv < 0:
             raise ValueError("INCOMPLETE_TOU_FORECAST")
         band = tariff_band(stamp.hour, kind, config)
-        result.append(Hour(stamp.isoformat(), stamp.hour, profile[stamp.hour], pv, config["prices"][band], band))
+        shares = profile.shares(stamp.hour) if isinstance(profile, LoadProfile) else ()
+        result.append(Hour(stamp.isoformat(), stamp.hour, profile[stamp.hour], pv, config["prices"][band],
+                           band, load_shares=shares))
     return result
 
 
@@ -599,9 +645,6 @@ def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetc
     report = {"decision": "abstain", "confidence": "low", "mode": "six_period_simulation",
               "execution_enabled": False}
 
-    def median_profile(rows):
-        return [median(row[1][hour] for row in rows) for hour in range(24)]
-
     try:
         soc, measured_at = measured_soc(snapshot, now, config)
         if measured_at is None:
@@ -610,8 +653,9 @@ def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetc
         limits = model_limits(snapshot, config)
         if len(selected) < config["min_profiles"]:
             raise ValueError("INSUFFICIENT_HOUSEHOLD_PROFILES")
-        profile = median_profile(selected)
+        profile, peak_profile = consumption_profiles(selected)
         hours = tou_hours(target, profile, weather, config)
+        peak_hours = tou_hours(target, peak_profile, weather, config) if peak_profile is not None else None
     except (ValueError, TypeError, KeyError) as error:
         return {**report, "decision_reason": str(error)}
 
@@ -638,11 +682,17 @@ def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetc
             second = fetch(following, config)
             if second.get("confidence") != "medium":
                 raise ValueError("LOW_CONFIDENCE")
-            hours += tou_hours(following, median_profile(next_profiles), second, config)
+            next_profile, next_peak = consumption_profiles(next_profiles)
+            next_hours = tou_hours(following, next_profile, second, config)
+            if peak_hours is not None or next_peak is not None:
+                peak_hours = (peak_hours if peak_hours is not None else hours.copy()) + (
+                    tou_hours(following, next_peak, second, config) if next_peak is not None else next_hours)
+            hours += next_hours
         except (requests.RequestException, ValueError, KeyError, TypeError, IndexError):
             issues.append("SECOND_DAY_FORECAST_UNAVAILABLE")
 
-    outcome = comparison(hours, periods, initial, limits, config, night_hours=night_window(config))
+    outcome = comparison(hours, periods, initial, limits, config, night_hours=night_window(config),
+                         peak_hours_profile=peak_hours)
     reference, proposed = (outcome["strategies"][key] for key in ("current", "full"))
     changes = []
     for index, (before, after) in enumerate(zip(reference["periods"], proposed["periods"]), 1):
