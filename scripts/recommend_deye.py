@@ -19,7 +19,10 @@ from deye_tou import Hour, comparison, hourly_steps, model_limits, read_periods,
 
 UTC = timezone.utc
 WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
+WEATHER_MODEL = "icon_eu"
+WEATHER_FALLBACK_MODEL = "ecmwf_ifs"
 WEATHER_FIELDS = {"global_tilted_irradiance": "W/m²", "sunshine_duration": "s", "cloud_cover": "%"}
+WEATHER_ERRORS = (requests.RequestException, ValueError, KeyError, TypeError, IndexError)
 TOU_TIMES = ("0000", "0500", "0800", "1300", "1700", "2100")
 ENERGY_FIELDS = ("Consumption", "Production", "ElectricityPurchasing", "GridFeed-in",
                  "ChargingCapacity", "DischargingCapacity")
@@ -102,6 +105,13 @@ def hour_starts(day):
 
 
 def forecast(day, config, *, get=requests.get):
+    try:
+        return forecast_with_model(day, config, WEATHER_MODEL, get)
+    except WEATHER_ERRORS:
+        return forecast_with_model(day, config, WEATHER_FALLBACK_MODEL, get)
+
+
+def forecast_with_model(day, config, model, get):
     hours = hour_starts(day)
     # Radiation and sunshine are preceding-hour aggregates. Request their UTC end times.
     end_times = [stamp + 3600 for stamp in hours]
@@ -109,6 +119,7 @@ def forecast(day, config, *, get=requests.get):
     response = get(WEATHER_URL, timeout=(5, 15), allow_redirects=False, params={
         "latitude": config["latitude"], "longitude": config["longitude"],
         "tilt": config["tilt"], "azimuth": config["azimuth"],
+        "models": model,
         "timezone": "GMT", "timeformat": "unixtime",
         "start_date": str(min(datetime.fromtimestamp(hours.start, UTC).date(), day)),
         "end_date": str(max(utc[-1].date(), day)),
@@ -118,7 +129,8 @@ def forecast(day, config, *, get=requests.get):
         raise ValueError("WEATHER_HTTP_ERROR")
     data = response.json()
     hourly = data["hourly"]
-    if any(data["hourly_units"].get(key) != unit for key, unit in WEATHER_FIELDS.items()):
+    units = data["hourly_units"]
+    if not isinstance(units, dict) or any(units.get(key) != unit for key, unit in WEATHER_FIELDS.items()):
         raise ValueError("WEATHER_UNITS")
     if len(set(hourly["time"])) != len(hourly["time"]):
         raise ValueError("DUPLICATE_WEATHER_HOUR")
@@ -139,7 +151,7 @@ def forecast(day, config, *, get=requests.get):
     daylight = numeric(daily["daylight_duration"][daily["time"].index(civil_day)])
     if data["daily_units"]["daylight_duration"] != "s" or daylight is None or not 0 <= daylight <= 86400:
         raise ValueError("INVALID_DAYLIGHT")
-    return {"source": "Open-Meteo", "daylight_hours": daylight / 3600,
+    return {"source": "Open-Meteo", "model": model, "daylight_hours": daylight / 3600,
             "sunshine_hours": sum(row["sunshine_seconds"] for row in records) / 3600,
             "irradiation_kwh_m2": sum(row["irradiation_kwh_m2"] for row in records),
             "cloud_cover_mean_pct": sum(row["cloud_cover_pct"] for row in records) / len(records),
@@ -756,8 +768,9 @@ def run(store, now, *, dry_run=False, recalculate=False, fetch=forecast):
     selected = history(store, target, config)
     try:
         weather = dict(fetch(target, config))
-    except (requests.RequestException, ValueError, KeyError, TypeError, IndexError):
-        weather = {"source": "Open-Meteo", "confidence": "unavailable", "issues": ["INCOMPLETE_OR_FAILED_FORECAST"]}
+    except WEATHER_ERRORS:
+        weather = {"source": "Open-Meteo", "model": None, "confidence": "unavailable",
+                   "issues": ["INCOMPLETE_OR_FAILED_FORECAST"]}
     weather.update({"queried_at": now.astimezone(MADRID).isoformat(), "forecast_date": str(target)})
     result = {"schema_version": 1, "date": str(target), "timezone": "Europe/Madrid",
               "settings_sha256": hashlib.sha256(canonical(config)).hexdigest(),

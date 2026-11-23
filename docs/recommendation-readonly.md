@@ -113,13 +113,23 @@ para evaluarlo. El TOU actual se simula como referencia aunque supere el 80 %.
   horario no valida el comportamiento exacto del firmware instalado.
   [Manual Deye SUN-SG05LP1-EU](https://www.deyeinverter.com/deyeinverter/2024/02/03/instructions_sun-3.6-8k-sg05lp1-eu_240203_en.pdf).
 
-- **Open-Meteo** aporta una única previsión diaria con series horarias. La
+- **Open-Meteo** aporta la previsión operativa con **ICON-EU** (`models=icon_eu`).
+  El informe registra el modelo en `forecast.model`. La
   radiación sobre el plano inclinado y el sol efectivo corresponden a la hora
   anterior al sello. La nubosidad se toma al comienzo del intervalo. La duración
   astronómica y el sol efectivo se registran por separado. Los intervalos UTC se
   convierten a Madrid y conservan el offset en días de 23 o 25 horas. La duración
   astronómica diaria UTC corresponde a la misma jornada solar en Madrid.
   [Documentación de Open-Meteo](https://open-meteo.com/en/docs).
+- **ECMWF IFS** (`ecmwf_ifs`) se usa si ICON-EU falla o devuelve datos
+  incompletos. La simulación utiliza la serie completa del modelo que superó
+  la validación y registra la previsión como no disponible si fallan ambos. Para
+  comparar ambos modelos, consulta Single Runs por separado con `models=icon_eu`
+  y `models=ecmwf_ifs`, la misma pasada `run` anterior a la recomendación y
+  los mismos parámetros de ubicación, inclinación y acimut. Solicita
+  `hourly=global_tilted_irradiance`, convierte los intervalos a Madrid y compara
+  la energía de ambos modelos con Deye en las mismas horas.
+  [Archivo Single Runs](https://open-meteo.com/en/docs/single-runs-api).
 - La producción estimada multiplica la irradiación horaria en kWh/m² por la
   potencia pico y el factor de rendimiento. El 14 % inicial agrupa pérdidas de
   temperatura, electrónica, cableado y suciedad como hipótesis de partida. La

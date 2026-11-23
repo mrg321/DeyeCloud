@@ -242,15 +242,27 @@ class ReadOnlyRecommendationTests(unittest.TestCase):
                     "daily": {"time": [midnight], "daylight_duration": [43200]}}
                 get = Mock(return_value=Mock(status_code=200, **{"json.return_value": data}))
                 result = forecast(day, settings(), get=get)
+                self.assertEqual(get.call_args.kwargs["params"]["models"], "icon_eu")
+                self.assertEqual(result["model"], "icon_eu")
                 self.assertEqual(len(result["hours"]), count)
                 self.assertEqual(len({row["hour"] for row in result["hours"]}), count)
                 self.assertEqual(result["daylight_hours"], 12)
                 self.assertEqual(result["sunshine_hours"], count / 2)
                 self.assertAlmostEqual(result["irradiation_kwh_m2"], count * 0.2)
                 self.assertLess(get.call_args.kwargs["params"]["start_date"], str(day))
+                fallback_data = {**data, "hourly": {**data["hourly"],
+                                                   "sunshine_duration": [900] * len(gti)}}
                 data["hourly"]["sunshine_duration"][-1] = None
                 with self.assertRaises(ValueError):
                     forecast(day, settings(), get=get)
+                get.reset_mock()
+                get.side_effect = [Mock(status_code=200, **{"json.return_value": data}),
+                                   Mock(status_code=200, **{"json.return_value": fallback_data})]
+                fallback = forecast(day, settings(), get=get)
+                self.assertEqual([call.kwargs["params"]["models"] for call in get.call_args_list],
+                                 ["icon_eu", "ecmwf_ifs"])
+                self.assertEqual(fallback["model"], "ecmwf_ifs")
+                self.assertEqual(fallback["sunshine_hours"], count / 4)
 
     def test_household_power_and_daily_consumption_not_grid_import(self):
         day = TARGET - timedelta(days=2)
