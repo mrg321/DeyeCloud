@@ -1,5 +1,9 @@
 # Fase 2 · Aprobación móvil
 
+La [Fase 3](deye_escritura_controlada.md#integración-con-la-aprobación-de-los-seis-tramos)
+añade la aplicación de propuestas TOU ejecutables tras el mismo comentario
+de aprobación del Issue privado.
+
 El workflow diario guarda la recomendación privada y envía un
 `repository_dispatch` a `DeyeCloud-data` con la fecha objetivo. Allí, un
 workflow crea y asigna un Issue privado a las cuentas autorizadas. GitHub

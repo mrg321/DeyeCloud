@@ -17,6 +17,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 
@@ -52,10 +53,11 @@ REQUEST_DEADLINE_SECONDS = 30
 class DeyeClientError(RuntimeError):
     """Only fixed, sanitized messages may be supplied to this exception."""
 
-    def __init__(self, message, *, code="DEYE_UNAVAILABLE", issues=None):
+    def __init__(self, message, *, code="DEYE_UNAVAILABLE", issues=None, details=None):
         super().__init__(message)
         self.code = code
         self.issues = issues
+        self.details = details
 
 
 def read_environment_credentials():
@@ -101,6 +103,14 @@ class DeyeClient:
         self._authenticated_until = 0.0
         self._session.close()
 
+    def _allowed_post(self, path, authenticated):
+        return ((path, authenticated) in {(TOKEN_PATH, False), (STATIONS_PATH, True)}
+                or (authenticated and any(path == read_path for read_path, _ in READS.values())))
+
+    def _application_succeeded(self, path, result):
+        return (result.get("success") is True
+                and (result.get("code") is None or str(result["code"]) == "1000000"))
+
     def _post(
         self,
         path: str,
@@ -108,13 +118,16 @@ class DeyeClient:
         *,
         params: dict | None = None,
         authenticated: bool = False,
+        diagnostics: bool = False,
     ) -> dict:
-        allowed = {(TOKEN_PATH, False), (STATIONS_PATH, True)}
-        allowed.update((path, True) for path, _ in READS.values())
-        if (path, authenticated) not in allowed:
+        if not self._allowed_post(path, authenticated):
             raise DeyeClientError("Operación no permitida por este cliente.")
         if authenticated and params is not None:
             raise DeyeClientError("Parámetros de consulta no permitidos.")
+        return self._request(self._session.post, path, authenticated=authenticated,
+                             diagnostics=diagnostics, params=params, json=body)
+
+    def _request(self, send, path, *, authenticated, diagnostics=False, diagnostic_serial=None, **kwargs):
         if authenticated and self._token is None:
             raise DeyeClientError("Es necesario autenticar antes de consultar.")
         if self._max_requests is not None and self._request_count >= self._max_requests:
@@ -128,24 +141,28 @@ class DeyeClient:
             headers["Authorization"] = f"bearer {self._token}"
         deadline = self._last_request + REQUEST_DEADLINE_SECONDS
         try:
-            with self._session.post(
+            with send(
                 BASE_URL + path,
-                params=params,
                 headers=headers,
-                json=body,
                 timeout=(5, 10),
                 verify=True,
                 allow_redirects=False,
                 stream=True,
+                **kwargs,
             ) as response:
                 # Reject redirects as well as HTTP errors, without exposing
                 # URLs (which contain AppId), response bodies or exceptions.
-                if not 200 <= response.status_code < 300:
-                    raise DeyeClientError(
+                http_status = response.status_code
+                http_error = None
+                if not 200 <= http_status < 300:
+                    http_error = DeyeClientError(
                         "Deye no pudo completar la consulta.",
                         code={401: "AUTH_REJECTED", 403: "ACCESS_DENIED",
                               429: "RATE_LIMITED"}.get(response.status_code, "DEYE_UNAVAILABLE"),
+                        details={"httpStatus": http_status} if diagnostics else None,
                     )
+                    if not diagnostic_serial or http_status < 400:
+                        raise http_error
                 content = bytearray()
                 for chunk in response.iter_content(chunk_size=8192):
                     if time.monotonic() > deadline:
@@ -156,9 +173,15 @@ class DeyeClient:
                 try:
                     result = json.loads(content)
                 except ValueError:
+                    if http_error is not None:
+                        raise http_error from None
                     raise DeyeClientError(
                         "El servidor no devolvió JSON válido."
                     ) from None
+                if http_error is not None:
+                    if isinstance(result, dict):
+                        http_error.details.update(self._response_details(result, diagnostic_serial))
+                    raise http_error
         except requests.exceptions.SSLError:
             raise DeyeClientError(
                 "Fallo TLS: no se pudo establecer una conexión verificada."
@@ -172,11 +195,8 @@ class DeyeClient:
 
         if not isinstance(result, dict):
             raise DeyeClientError("Formato de respuesta inesperado.")
-        if result.get("success") is not True or (
-            result.get("code") is not None
-            and str(result["code"]) != "1000000"
-        ):
-            # Never echo msg, arbitrary application codes or response bodies.
+        if not self._application_succeeded(path, result):
+            # Keep read errors fixed. Only the explicit write test requests details.
             safe_code = {
                 "2101027": "ACCESS_DENIED", "2104006": "DEVICE_OFFLINE",
                 "2106001": "UNSUPPORTED_CONFIG_POINT", "2104005": "UNSUPPORTED_DEVICE",
@@ -184,10 +204,33 @@ class DeyeClient:
                 "2101006": "API_ARGUMENT_REJECTED", "2101008": "API_ARGUMENT_TYPE_REJECTED",
                 "2101012": "API_INTERVAL_REJECTED",
             }.get(str(result.get("code")), "DEYE_UNAVAILABLE")
-            raise DeyeClientError("Deye devolvió un error de aplicación.", code=safe_code)
+            details = None
+            if diagnostics:
+                serial = diagnostic_serial or kwargs.get("json", {}).get("deviceSn")
+                details = {"httpStatus": http_status, **self._response_details(result, serial)}
+            raise DeyeClientError("Deye devolvió un error de aplicación.", code=safe_code, details=details)
         if authenticated and self._read_observer is not None:
             self._read_observer(path, result)
         return result
+
+    def _response_details(self, result, serial=None):
+        details = {}
+        for field, pattern in (("code", r"[0-9]{1,16}"),
+                               ("requestId", r"[A-Za-z0-9_-]{1,128}")):
+            raw_value = result.get(field)
+            value = str(raw_value) if type(raw_value) in (int, str) else ""
+            if re.fullmatch(pattern, value) and value not in (self._token, serial):
+                details[field] = value
+        for field in ("msg", "error"):
+            message = result.get(field)
+            if type(message) in (str, int):
+                message = str(message)
+                for value in (self._token, serial):
+                    if value:
+                        message = message.replace(value, "[oculto]")
+                details[field] = "".join(char if char.isprintable() else " "
+                                         for char in message[:500])
+        return details
 
     def query_read(self, name: str, arguments: dict) -> dict:
         """Only named, documented read operations; no user-supplied HTTP body."""

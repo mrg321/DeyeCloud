@@ -10,6 +10,8 @@ import re
 from deye_history_quality import MADRID
 from deye_private_store import GitHubPrivateStore, canonical
 from deye_tou import read_periods
+from deye_tou_write import apply_approved, execution_binding
+from deye_control import DeyeControlClient
 
 
 COMMAND = re.compile(r"/deye (approve|reject|cancel) (\d{4}-\d{2}-\d{2}) ([a-f0-9]{64})")
@@ -126,8 +128,12 @@ def night_soc_text(night):
 
 
 def tou_issue_text(payload, identity, result, forecast):
-    lines = [f"**Simulación TOU · {payload['date']}**", "",
-             "La aprobación registra una revisión de la simulación. La ejecución está deshabilitada.",
+    execution = payload.get("execution_enabled") is True
+    title = "Aplicación TOU" if execution else "Simulación TOU"
+    description = ("Aprobar autoriza el envío del JSON mostrado al inversor indicado."
+                   if execution else
+                   "La aprobación registra una revisión de la simulación. La ejecución está deshabilitada.")
+    lines = [f"**{title} · {payload['date']}**", "", description,
              f"Caduca {payload['expires_at']} · confianza {result['confidence']}"]
     if "night_soc" in result:
         lines += ["", night_soc_text(result["night_soc"])]
@@ -175,6 +181,8 @@ def tou_issue_text(payload, identity, result, forecast):
             lines.extend([f"{title} · {low:.3f} a {high:.3f}", "", f"`{graph}`", ""])
         lines += ["</details>"]
     lines += ["", result["decision_reason"]]
+    if execution:
+        lines += ["", "~~~json", json.dumps(payload["write_body"], indent=2), "~~~"]
     if payload["actionable"]:
         lines += ["", "~~~text", *(f"/deye {command} {payload['date']} {identity}" for command in DECISIONS), "~~~"]
     return "\n".join(lines)
@@ -228,7 +236,7 @@ def reconcile_expiry(store, now):
     return False
 
 
-def notify(store, day, cutoff, now, reviewers):
+def notify(store, day, cutoff, now, reviewers, *, execution_enabled=False):
     if day != str(now.astimezone(MADRID).date() + timedelta(days=1)):
         return "STALE_DISPATCH"
     report = store.read(f"recommendations/{day}.json")
@@ -249,8 +257,11 @@ def notify(store, day, cutoff, now, reviewers):
     current_path = f"approvals/current/{day}.json"
     current = store.read(current_path) or {}
     report_hash = digest(report)
+    executable = phase3 is not None and actionable and execution_enabled
     if current.get("report_sha256") == report_hash:
-        return "ALREADY_NOTIFIED"
+        previous = store.read(proposal_path(day, current["proposal_id"])) or {}
+        if bool(previous.get("payload", {}).get("execution_enabled")) == executable:
+            return "ALREADY_NOTIFIED"
     payload = {"schema_version": 1, "date": day, "report_sha256": report_hash,
                "expires_at": deadline.isoformat(), "current_targets": targets,
                "slots_madrid": ["00:00–05:00", "05:00–08:00"],
@@ -259,9 +270,11 @@ def notify(store, day, cutoff, now, reviewers):
         strategies = phase3.get("strategies", {})
         payload = {"schema_version": 2, "date": day, "report_sha256": report_hash,
                    "expires_at": deadline.isoformat(), "actionable": actionable,
-                   "execution_enabled": False, "snapshot_sha256": phase3.get("snapshot_sha256"),
+                   "execution_enabled": executable, "snapshot_sha256": phase3.get("snapshot_sha256"),
                    "current_periods": strategies.get("current", {}).get("periods"),
                    "proposed_periods": strategies.get("full", {}).get("periods")}
+        if executable:
+            payload.update(execution_binding(store, payload, report))
     identity = digest(payload)
     if proposal_path(day, identity) in store.entries:
         return "PREVIOUS_PROPOSAL"
@@ -350,7 +363,7 @@ def decide(store, event, reviewers, now):
         if (preflight == "EXECUTION_DISABLED" and latest_parameters is not None
                 and digest(latest_parameters) != payload["snapshot_sha256"]):
             preflight = "CONFIGURATION_CHANGED"
-        status = {"EXECUTION_DISABLED": "simulation_approved",
+        status = {"EXECUTION_DISABLED": "approved" if payload.get("execution_enabled") is True else "simulation_approved",
                   "CONFIGURATION_CHANGED": "configuration_changed",
                   "CONFIGURATION_UNAVAILABLE": "configuration_unavailable"}[preflight]
     store.publish({path: terminal(day, identity, status, now, actor_id=actor["id"],
@@ -358,6 +371,53 @@ def decide(store, event, reviewers, now):
                                   commented_at=created.isoformat(), issue=record["issue"])})
     close_issue(store, record["issue"])
     return status.upper()
+
+
+def execute_event(factory, event, reviewers, clock, *, client_factory=DeyeControlClient):
+    original = event["comment"]
+    actor = event["sender"]
+    match = COMMAND.fullmatch(original["body"].strip())
+    if (not match or match[1] != "approve" or event.get("action") != "created"
+            or "pull_request" in event["issue"] or actor["type"] != "User"
+            or actor["id"] not in reviewers or original["user"]["id"] != actor["id"]
+            or type(original.get("id")) is not int or original["id"] <= 0):
+        return "NO_EXECUTABLE_APPROVAL"
+    _, day, identity = match.groups()
+
+    def authorize(store, now):
+        record = store.read(proposal_path(day, identity)) or {}
+        payload = record.get("payload") or {}
+        decision = store.read(decision_path(day, identity)) or {}
+        current = store.read(f"approvals/current/{day}.json") or {}
+        if (payload.get("schema_version") != 2 or payload.get("execution_enabled") is not True
+                or payload.get("actionable") is not True or payload.get("date") != day
+                or digest(payload) != identity or current.get("proposal_id") != identity
+                or current.get("report_sha256") != payload.get("report_sha256")
+                or decision.get("status") != "approved" or decision.get("command") != "approve"
+                or decision.get("date") != day or decision.get("proposal_id") != identity
+                or decision.get("comment_id") != original["id"] or decision.get("actor_id") != actor["id"]
+                or decision.get("issue") != event["issue"]["number"] or record.get("issue") != decision["issue"]):
+            return None
+        deadline = datetime.fromisoformat(payload["expires_at"])
+        commented = datetime.fromisoformat(decision["commented_at"])
+        recorded = datetime.fromisoformat(decision["recorded_at"])
+        if not commented <= recorded <= now < deadline:
+            return None
+        comment = store._request("GET", f"/issues/comments/{original['id']}")
+        if (comment["user"]["id"] != actor["id"] or comment["user"]["type"] != "User"
+                or comment["body"] != original["body"] or comment["created_at"] != comment["updated_at"]
+                or datetime.fromisoformat(comment["created_at"]) != commented
+                or not comment["issue_url"].endswith(f"/issues/{record['issue']}")):
+            return None
+        report = store.read(f"recommendations/{day}.json")
+        if not report or digest(report) != payload["report_sha256"]:
+            return None
+        binding = execution_binding(store, payload, report)
+        if any(payload.get(key) != value for key, value in binding.items()):
+            return None
+        return payload
+
+    return apply_approved(factory, client_factory, day, identity, authorize, clock)
 
 
 def main():
@@ -381,6 +441,13 @@ def main():
         def store_from_event():
             return GitHubPrivateStore(repository, os.environ["GH_TOKEN"],
                                       public_repository=os.environ["DEYE_APPROVAL_CODE_REPOSITORY"])
+        enabled = os.environ.get("DEYE_TOU_WRITE_ENABLED") == "true"
+        if os.environ.get("DEYE_APPROVAL_STAGE") == "execute":
+            if not enabled or event_name != "issue_comment":
+                return 0
+            result = execute_event(store_from_event, event, reviewers, lambda: datetime.now(UTC))
+            print("Approval execution:", result)
+            return 0 if result in {"VERIFIED", "NO_EXECUTABLE_APPROVAL", "ALREADY_ATTEMPTED"} else 1
         store = store_from_event()
         try:
             if event_name == "issue_comment":
@@ -390,7 +457,8 @@ def main():
                     store.close()
                     store = store_from_event()
                 result = notify(store, event["client_payload"]["date"],
-                                os.environ.get("DEYE_APPROVAL_CUTOFF") or "23:00", now, reviewers)
+                                os.environ.get("DEYE_APPROVAL_CUTOFF") or "23:00", now, reviewers,
+                                execution_enabled=enabled)
         finally:
             store.close()
     except Exception:

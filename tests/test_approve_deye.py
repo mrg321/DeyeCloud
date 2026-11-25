@@ -256,13 +256,17 @@ class ApprovalTests(unittest.TestCase):
                                           "issue_comment": {"types": ["created"]}})
         job = workflow["jobs"]["approval"]
         self.assertEqual(job["permissions"], {"contents": "write", "issues": "write"})
-        self.assertLessEqual(job["timeout-minutes"], 3)
+        self.assertLessEqual(job["timeout-minutes"], 15)
         self.assertIn("github.event.repository.private", job["if"])
         self.assertIn("DEYE_APPROVER_IDS", job["if"])
         checkout = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@"))
         self.assertEqual(checkout["with"], {"repository": "mrg321/DeyeCloud",
                                             "ref": "refs/heads/main", "persist-credentials": False})
-        self.assertNotIn("secrets.", json.dumps(workflow))
+        approval_step, write_step = job["steps"][-2:]
+        self.assertNotIn("secrets.", json.dumps(approval_step))
+        self.assertIn("github.event_name == 'issue_comment'", write_step["if"])
+        self.assertIn("DEYE_TOU_WRITE_ENABLED", write_step["if"])
+        self.assertEqual(write_step["env"]["DEYE_APPROVAL_STAGE"], "execute")
         self.assertNotIn("sleep", json.dumps(workflow))
 
 
