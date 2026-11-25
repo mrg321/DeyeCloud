@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import approve_deye as approval
 import recommend_deye as recommendation
+import sync_deye_private as private_sync
 from deye_private_store import ApprovalWorkflowMissing, GitHubPrivateStore
 
 
@@ -95,54 +96,69 @@ class ApprovalTests(unittest.TestCase):
         store._request.assert_called_once_with("POST", "/dispatches", {
             "event_type": "deye-recommendation", "client_payload": {"date": DAY}})
 
-    def test_first_dispatch_installs_then_retries_with_data_token(self):
-        installer, refreshed = Mock(), Mock()
-        with patch.dict("os.environ", {"DEYE_APPROVAL_WORKFLOW_TOKEN": "installer",
-                                      "DEYE_APPROVER_IDS": "[123]",
-                                      "DEYE_APPROVER_LOGINS": '{"123":"reviewer"}'}, clear=True), \
-                patch.object(recommendation, "GitHubPrivateStore", side_effect=[installer, refreshed]) as store:
+    def test_dispatch_uses_only_data_token_after_sync(self):
+        with patch.object(recommendation, "GitHubPrivateStore") as store:
             recommendation.dispatch_approval("test/DeyeCloud-data", "data", "test/DeyeCloud", DAY)
-        self.assertEqual([call.args[1] for call in store.call_args_list], ["installer", "data"])
-        installer.install_approval_workflow.assert_called_once_with(
-            (ROOT / "config/deye-approval.workflow.example.json").read_bytes())
-        installer.ensure_approval_variables.assert_called_once_with({
-            "DEYE_APPROVER_IDS": "[123]", "DEYE_APPROVER_LOGINS": '{"123":"reviewer"}',
-            "DEYE_APPROVAL_ENABLED": "true"})
-        refreshed.dispatch_approval.assert_called_once_with(DAY)
-        installer.close.assert_called_once()
-        refreshed.close.assert_called_once()
+        store.assert_called_once_with("test/DeyeCloud-data", "data", public_repository="test/DeyeCloud")
+        store.return_value.dispatch_approval.assert_called_once_with(DAY)
+        store.return_value.close.assert_called_once()
 
-    def test_dispatch_copies_explicit_cutoff(self):
-        installer, refreshed = Mock(), Mock()
-        with patch.dict("os.environ", {"DEYE_APPROVAL_WORKFLOW_TOKEN": "installer",
-                                      "DEYE_APPROVER_IDS": "[123]", "DEYE_APPROVAL_CUTOFF": "22:30",
-                                      "DEYE_APPROVER_LOGINS": '{"123":"reviewer"}'}, clear=True), \
-                patch.object(recommendation, "GitHubPrivateStore", side_effect=[installer, refreshed]):
-            recommendation.dispatch_approval("test/DeyeCloud-data", "data", "test/DeyeCloud", DAY)
-        self.assertEqual(installer.ensure_approval_variables.call_args.args[0]["DEYE_APPROVAL_CUTOFF"], "22:30")
+    def test_sync_replaces_all_managed_settings_before_enabling_writes(self):
+        env = {name: f"fake-{name}" for name in private_sync.SECRET_NAMES}
+        env.update(DEYE_APPROVAL_ENABLED="true", DEYE_TOU_WRITE_ENABLED="true",
+                   DEYE_APPROVER_IDS="[123]", DEYE_APPROVER_LOGINS='{"123":"reviewer"}')
+        with (patch.object(private_sync, "GitHubPrivateStore") as factory,
+              patch.object(private_sync.subprocess, "run", return_value=Mock(returncode=0)) as run):
+            private_sync.sync("test/DeyeCloud-data", "test/DeyeCloud", "installer", env)
+        self.assertEqual(run.call_count, 4)
+        for name, call in zip(private_sync.SECRET_NAMES, run.call_args_list):
+            self.assertEqual(call.args[0], ["gh", "secret", "set", name, "--repo", "test/DeyeCloud-data"])
+            self.assertEqual(call.kwargs["input"], env[name].encode("utf-8"))
+            self.assertEqual(call.kwargs["env"]["GH_TOKEN"], "installer")
+        store = factory.return_value
+        self.assertEqual(store.verify_private.call_count, 4)
+        store.sync_approval_workflow.assert_called_once()
+        calls = store.sync_approval_variables.call_args_list
+        self.assertEqual(calls[1].args[0]["DEYE_APPROVAL_CUTOFF"], "23:00")
+        self.assertEqual(calls[-1].args[0], {"DEYE_TOU_WRITE_ENABLED": "true", "DEYE_APPROVAL_ENABLED": "true"})
 
-    def test_variable_sync_creates_only_missing_values(self):
+    def test_sync_failure_stops_before_installing_or_enabling(self):
+        env = {name: "fake-value" for name in private_sync.SECRET_NAMES}
+        with (patch.object(private_sync, "GitHubPrivateStore") as factory,
+              patch.object(private_sync.subprocess, "run", return_value=Mock(returncode=1))):
+            with self.assertRaisesRegex(RuntimeError, "SECRET_SYNC_FAILED_DEYE_APP_ID"):
+                private_sync.sync("test/DeyeCloud-data", "test/DeyeCloud", "installer", env)
+        store = factory.return_value
+        store.sync_approval_variables.assert_called_once_with({
+            "DEYE_TOU_WRITE_ENABLED": "false", "DEYE_APPROVAL_ENABLED": "false"})
+        store.sync_approval_workflow.assert_not_called()
+        store.close.assert_called_once()
+
+    def test_variable_sync_overwrites_and_creates_values(self):
         store = object.__new__(GitHubPrivateStore)
         store.verify_private = Mock()
-        store._request = Mock(side_effect=[{"value": "[456]"}, None, {}])
-        store.ensure_approval_variables({"DEYE_APPROVER_IDS": "[123]", "DEYE_APPROVAL_CUTOFF": "23:00"})
+        store._request = Mock(side_effect=[{"value": "[456]"}, {}, None, {}])
+        store.sync_approval_variables({"DEYE_APPROVER_IDS": "[123]", "DEYE_APPROVAL_CUTOFF": "23:00"})
+        self.assertEqual(store._request.call_args_list[1].args, ("PATCH", "/actions/variables/DEYE_APPROVER_IDS",
+                         {"name": "DEYE_APPROVER_IDS", "value": "[123]"}))
         self.assertEqual(store._request.call_args.args, ("POST", "/actions/variables",
                          {"name": "DEYE_APPROVAL_CUTOFF", "value": "23:00"}))
-        store.verify_private.assert_called_once()
+        self.assertEqual(store.verify_private.call_count, 2)
 
-    def test_installer_creates_only_in_private_main_and_preserves_existing_file(self):
+    def test_workflow_sync_creates_and_overwrites_using_current_sha(self):
         store = object.__new__(GitHubPrivateStore)
         store.entries = {}
         store._request = Mock(return_value={"private": True, "visibility": "private", "default_branch": "main"})
-        store.install_approval_workflow(b"{}")
+        store.sync_approval_workflow(b"{}")
         method, path, body = store._request.call_args.args
         self.assertEqual((method, path), ("PUT", "/contents/.github/workflows/deye-approval.yml"))
         self.assertEqual(body["branch"], "main")
         self.assertNotIn("sha", body)
         store._request.reset_mock()
-        store.entries[".github/workflows/deye-approval.yml"] = {"type": "blob"}
-        store.install_approval_workflow(b"{}")
-        store._request.assert_not_called()
+        store.entries[".github/workflows/deye-approval.yml"] = {
+            "type": "blob", "mode": "100644", "sha": "a" * 40}
+        store.sync_approval_workflow(b"{}")
+        self.assertEqual(store._request.call_args.args[2]["sha"], "a" * 40)
 
     def notify(self, store):
         return approval.notify(store, DAY, "23:00", NOW, REVIEWERS)

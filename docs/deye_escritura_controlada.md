@@ -108,9 +108,10 @@ el comentario `/deye approve <fecha> <huella>`. Cuando se habilita
 el inversor y el JSON completo de la estrategia TOU recomendada. El mismo
 evento de aprobación registra la decisión y, después, llama al ejecutor.
 Las propuestas emitidas como simulación siguen siendo de simulación.
-El workflow requiere las credenciales Deye como secretos privados en la etapa
-de aplicación. La plantilla actualizada debe instalarse en el repositorio
-privado antes de habilitar la variable.
+Configurar la variable y las credenciales Deye en `DeyeCloud`. La ejecución
+diaria sincroniza las credenciales, los flags y la plantilla del workflow
+privado antes de enviar la propuesta a aprobación. [Configuración de la
+sincronización](approval.md#instalación)
 
 El ejecutor comprueba la vigencia de la propuesta y del comentario. Valida
 los seis tramos ordenados, los límites de SOC y que la recomendación siga

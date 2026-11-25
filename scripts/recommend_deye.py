@@ -846,23 +846,7 @@ def run(store, now, *, dry_run=False, recalculate=False, fetch=forecast):
 
 
 def dispatch_approval(repository, data_token, public_repository, day):
-    workflow_token = os.environ.get("DEYE_APPROVAL_WORKFLOW_TOKEN")
-    values = {name: os.environ.get(name, "") for name in ("DEYE_APPROVER_IDS", "DEYE_APPROVER_LOGINS")}
-    if not workflow_token or not all(values.values()):
-        raise ApprovalWorkflowMissing("APPROVAL_CONFIGURATION_MISSING")
-    values["DEYE_APPROVAL_ENABLED"] = "true"
-    cutoff = os.environ.get("DEYE_APPROVAL_CUTOFF")
-    if cutoff:
-        values["DEYE_APPROVAL_CUTOFF"] = cutoff
-    template = (Path(__file__).resolve().parents[1] / "config/deye-approval.workflow.example.json").read_bytes()
-    installer = GitHubPrivateStore(repository, workflow_token, public_repository=public_repository)
-    try:
-        installer.ensure_approval_variables(values)
-        installer.install_approval_workflow(template)
-    finally:
-        installer.close()
-
-    # Refresh the branch snapshot and dispatch with the ordinary data credential.
+    # The daily workflow has already synchronized the private Actions configuration.
     refreshed = GitHubPrivateStore(repository, data_token, public_repository=public_repository)
     try:
         refreshed.dispatch_approval(day)
@@ -893,7 +877,7 @@ def main(argv=None):
         finally:
             store.close()
     except ApprovalWorkflowMissing:
-        print("Recommendation retained. Verify the approval variables and DEYE_APPROVAL_WORKFLOW_TOKEN in DeyeCloud, then rerun.")
+        print("Recommendation retained. Synchronize the private approval workflow from DeyeCloud and rerun.")
         return 1
     except Exception:
         print(f"Recommendation failed after {monotonic() - start:.1f} s. Private details suppressed.")

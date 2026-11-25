@@ -10,8 +10,8 @@ workflow crea y asigna un Issue privado a las cuentas autorizadas. GitHub
 notifica la asignación según las preferencias de cada cuenta. El job termina
 y la espera usa **cero minutos de runner**. Un comentario nuevo válido
 dispara otro job que registra la decisión. Una decisión aprobada autoriza
-únicamente los dos objetivos de SOC incluidos en la propuesta. En esta fase,
-el registro es el resultado final y el workflow carece de credenciales Deye.
+únicamente los cambios incluidos en la propuesta. En la Fase 2, el registro
+es el resultado final y la etapa de aprobación se ejecuta sin credenciales Deye.
 
 ## Elección del mecanismo
 
@@ -33,9 +33,10 @@ las propuestas, las decisiones y su historial, con menos infraestructura.
    repositorio privado `mrg321/DeyeCloud-data`. En el entorno
    `deye-production` de **`DeyeCloud`**, configura el secreto
    `DEYE_APPROVAL_WORKFLOW_TOKEN` con un token dedicado a `DeyeCloud-data`
-   con **Contents: write**, **Workflows: write** y **Variables: write**. La ejecución diaria usa
-   esta credencial para copiar [la plantilla](../config/deye-approval.workflow.example.json)
-   a `.github/workflows/deye-approval.yml` en `main` solo si falta.
+   con **Contents: write**, **Workflows: write**, **Variables: write** y **Secrets: write**.
+   Cada ejecución normal usa esta credencial para sincronizar
+   [la plantilla](../config/deye-approval.workflow.example.json) con
+   `.github/workflows/deye-approval.yml` en `main` y reemplaza el archivo si difiere.
    El workflow privado usa el código de `main` de `mrg321/DeyeCloud`.
    [Permisos de la API de contenido de GitHub](https://docs.github.com/en/rest/repos/contents#create-or-update-file-contents).
 2. Configura en las variables de Actions de **`DeyeCloud`**
@@ -48,31 +49,31 @@ las propuestas, las decisiones y su historial, con menos infraestructura.
 3. Configura opcionalmente `DEYE_APPROVAL_CUTOFF` en **`DeyeCloud`**
    con formato `HH:MM`. Por defecto es `23:00` de Madrid del día anterior a la
    fecha objetivo. Si la variable está sin definir, el worker usa ese valor
-   internamente. Solo se copia al privado cuando se configura en `DeyeCloud`.
+   y lo sincroniza al privado si la variable de origen está vacía.
    El cambio de hora se resuelve al crear cada propuesta.
 4. Establece `DEYE_APPROVAL_ENABLED=true` en **`DeyeCloud`** cuando quieras
    activar el flujo. El repositorio de código también necesita las variables
    de habilitación de la [Fase 1](recommendation-readonly.md). El token de datos
    existente, con **Contents: write** en el privado, envía el despacho privado.
-   Cada ejecución copia al privado las variables de aprobación que falten.
-   Conserva los valores privados existentes. Para propagar un valor cambiado
-   en `DeyeCloud`, elimina su copia privada y vuelve a ejecutar el flujo.
-   Antes de enviar el evento, el flujo comprueba que el fichero existe en la
-   rama privada e intenta instalarlo si falta. Si la instalación falla,
-   conserva la recomendación y marca el paso como fallido para poder
-   repetirlo tras corregir la credencial o los permisos.
+   Cada ejecución normal sobrescribe en el privado las variables de
+   aprobación y `DEYE_TOU_WRITE_ENABLED` desde `DeyeCloud`. También
+   actualiza `DEYE_APP_ID`, `DEYE_APP_SECRET`, `DEYE_EMAIL` y
+   `DEYE_PASSWORD` desde los secretos de `deye-production`. El token de
+   sincronización se usa solo en el repositorio de origen.
+   Si la sincronización falla, el flujo no envía la recomendación a aprobación.
    El worker usa su propio `GITHUB_TOKEN` con **Contents: write** e **Issues:
    write** en el privado. Comprueba que las restricciones de Actions y de la
    rama permiten que ese token guarde la auditoría. GitHub genera el
-   `GITHUB_TOKEN` del worker y ningún secreto se copia al repositorio privado.
+   `GITHUB_TOKEN` del worker. Los cuatro secretos Deye los recibe la etapa
+   de escritura del repositorio privado.
    [API de repository_dispatch](https://docs.github.com/en/rest/repos/repos#create-a-repository-dispatch-event).
 
 El cron externo conserva el disparo de `deye-daily.yml`. El evento privado
 de recomendación y el comentario humano se gestionan en GitHub
-independientemente de cron-job.org. El modo de prueba de la Fase 1 omite el
-despacho privado.
+independientemente de cron-job.org. El modo de prueba de la Fase 1 omite la
+sincronización y el despacho privado.
 
-Para instalar manualmente se puede usar
+Para sincronizar manualmente solo el archivo del workflow se puede usar
 `./scripts/Install-DeyeApprovalWorkflow.ps1` desde PowerShell con `gh`
 autenticado y permisos de escritura de workflows. `-WhatIf` comprueba el destino
 sin escribir.

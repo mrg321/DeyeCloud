@@ -26,25 +26,29 @@ if ($tree.truncated -cne $false -or $null -eq $tree.tree) {
     throw 'Could not verify the complete main branch tree.'
 }
 $entry = $tree.tree | Where-Object { $_.path -ceq $workflowPath }
-if ($entry) {
-    if ($entry.type -cne 'blob' -or $entry.mode -cne '100644') {
-        throw 'The existing workflow path cannot be verified as a regular file.'
-    }
-    Write-Host "Workflow already exists in $repository/main. No changes made."
-    return
-}
-
 $template = Join-Path (Split-Path -Parent $PSScriptRoot) 'config/deye-approval.workflow.example.json'
 $content = [IO.File]::ReadAllBytes($template)
 $null = [Text.Encoding]::UTF8.GetString($content) | ConvertFrom-Json
-if ($PSCmdlet.ShouldProcess("$repository/main/$workflowPath", 'Create approval workflow')) {
+if ($entry) {
+    if ($entry.type -cne 'blob' -or $entry.mode -cne '100644' -or $entry.sha -cnotmatch '^[0-9a-f]{40}$') {
+        throw 'The existing workflow path cannot be verified as a regular file.'
+    }
+    $sourceSha = & git hash-object --no-filters -- $template
+    if ($LASTEXITCODE -ne 0) { throw 'Could not hash the workflow template.' }
+    if ($sourceSha -ceq $entry.sha) {
+        Write-Host "Workflow matches the source template in $repository/main."
+        return
+    }
+}
+
+if ($PSCmdlet.ShouldProcess("$repository/main/$workflowPath", 'Synchronize approval workflow')) {
     Assert-PrivateDestination
     $payload = @{
         branch = 'main'
-        message = 'Install private Deye approval workflow'
+        message = 'Sync private Deye approval workflow'
         content = [Convert]::ToBase64String($content)
-    } | ConvertTo-Json -Compress
-    # An update requires the existing blob SHA. Omitting it makes this create-only.
-    $payload | & $gh api --method PUT "repos/$repository/contents/$workflowPath" --input - --jq '.content.path'
-    if ($LASTEXITCODE -ne 0) { throw 'Workflow creation failed. Verify GitHub workflow permissions and rerun.' }
+    }
+    if ($entry) { $payload['sha'] = $entry.sha }
+    $payload | ConvertTo-Json -Compress | & $gh api --method PUT "repos/$repository/contents/$workflowPath" --input - --jq '.content.path'
+    if ($LASTEXITCODE -ne 0) { throw 'Workflow synchronization failed. Verify GitHub workflow permissions and rerun.' }
 }

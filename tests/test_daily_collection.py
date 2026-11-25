@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import sys
 import unittest
 from contextlib import ExitStack, redirect_stdout
@@ -424,9 +425,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(set(recommendation["env"]),
                          {"DEYE_RECOMMENDATION_ENABLED", "DEYE_RECOMMENDATION_DRY_RUN",
                           "DEYE_RECALCULATE_RECOMMENDATION", "DEYE_APPROVAL_ENABLED",
-                          "DEYE_APPROVAL_WORKFLOW_TOKEN",
-                          "DEYE_APPROVER_IDS", "DEYE_APPROVER_LOGINS", "DEYE_APPROVAL_CUTOFF",
                           "DEYE_DATA_REPOSITORY", "DEYE_DATA_TOKEN"})
+        sync = next(step for step in job["steps"] if "scripts/sync_deye_private.py" in step.get("run", ""))
+        self.assertIn("!inputs.recommendation_dry_run", sync["if"])
+        self.assertLess(job["steps"].index(sync), job["steps"].index(recommendation))
+        private = json.loads((Path(__file__).resolve().parents[1]
+                              / "config/deye-approval.workflow.example.json").read_text())
+        for name in re.findall(r"(?:vars|secrets)\.(DEYE_[A-Z_]+)", json.dumps(private)):
+            self.assertIn(name, sync["env"])
         self.assertIn("DEYE_AUTOMATION_ENABLED", job["if"])
         self.assertIn("default_branch", job["if"])
         for step in job["steps"]:

@@ -23,6 +23,10 @@ PUBLIC_FILES = frozenset({
     "config/deye-approval.workflow.example.json", "scripts/approve_deye.py",
     "tests/test_approve_deye.py", "docs/approval.md", "scripts/Invoke-DeyeWorkflowSimulation.ps1",
     "scripts/Install-DeyeApprovalWorkflow.ps1",
+    "scripts/sync_deye_private.py",
+    "scripts/deye_control.py", "scripts/deye_tou_write.py", "scripts/deye_write_lock.py",
+    "scripts/test_write_deye_time1.py", "tests/test_deye_tou_write.py",
+    "tests/test_deye_time1_preview.py", "docs/deye_escritura_controlada.md",
     "tests/test_deye_local.py", "tests/test_deye_audit.py",
     "tests/test_deye_history.py", "tests/test_daily_collection.py", "tests/test_publication.py",
 })

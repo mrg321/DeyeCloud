@@ -81,7 +81,8 @@ class GitHubPrivateStore:
             base = "https://api.github.com" if method == "GET" and path.startswith("/users/") else self._url
             with self._session.request(method, base + path, json=payload,
                     timeout=(5, 30), verify=True, allow_redirects=False, stream=True) as response:
-                if response.status_code == 204 and path == "/dispatches":
+                if response.status_code == 204 and (path == "/dispatches"
+                        or (method == "PATCH" and path.startswith("/actions/variables/"))):
                     return {}
                 if response.status_code == 201 and method == "POST" and path == "/actions/variables":
                     return {}
@@ -114,25 +115,33 @@ class GitHubPrivateStore:
         self._request("POST", "/dispatches", {
             "event_type": "deye-recommendation", "client_payload": {"date": day}})
 
-    def install_approval_workflow(self, template):
-        if APPROVAL_WORKFLOW_PATH in self.entries:
-            return
+    def sync_approval_workflow(self, template):
+        entry = self.entries.get(APPROVAL_WORKFLOW_PATH)
+        if entry is not None:
+            if (entry.get("type") != "blob" or entry.get("mode") != "100644"
+                    or not re.fullmatch(r"[0-9a-f]{40}", entry.get("sha") or "")):
+                raise PrivateStoreError("APPROVAL_WORKFLOW_NOT_REGULAR")
+            if entry["sha"] == blob_sha(template):
+                return
         metadata = self._request("GET", "")
         if (metadata.get("private") is not True or metadata.get("visibility") != "private"
                 or metadata.get("default_branch") != "main"):
             raise PrivateStoreError("APPROVAL_WORKFLOW_DESTINATION_INVALID")
-        # The Contents API requires a SHA to replace an existing file. A concurrent
-        # installation therefore cannot be overwritten by this create request.
-        self._request("PUT", "/contents/" + APPROVAL_WORKFLOW_PATH, {
-            "branch": "main", "message": "Install private Deye approval workflow",
-            "content": base64.b64encode(template).decode("ascii")})
+        payload = {"branch": "main", "message": "Sync private Deye approval workflow",
+                   "content": base64.b64encode(template).decode("ascii")}
+        if entry is not None:
+            payload["sha"] = entry["sha"]
+        self._request("PUT", "/contents/" + APPROVAL_WORKFLOW_PATH, payload)
 
-    def ensure_approval_variables(self, values):
+    def sync_approval_variables(self, values):
         for name, value in values.items():
             path = "/actions/variables/" + name
-            if self._request("GET", path, missing_ok=True) is None:
-                self.verify_private()
+            current = self._request("GET", path, missing_ok=True)
+            self.verify_private()
+            if current is None:
                 self._request("POST", "/actions/variables", {"name": name, "value": value})
+            else:
+                self._request("PATCH", path, {"name": name, "value": value})
 
     def read(self, path):
         if not valid_data_path(path):
