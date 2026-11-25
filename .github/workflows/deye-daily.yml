@@ -59,6 +59,24 @@
           }
         },
         {
+          "name": "Synchronize private Actions configuration",
+          "if": "${{ !inputs.recommendation_dry_run }}",
+          "run": "python -B scripts/sync_deye_private.py",
+          "env": {
+            "DEYE_DATA_REPOSITORY": "${{ vars.DEYE_DATA_OWNER || github.repository_owner }}/DeyeCloud-data",
+            "DEYE_APPROVAL_WORKFLOW_TOKEN": "${{ secrets.DEYE_APPROVAL_WORKFLOW_TOKEN }}",
+            "DEYE_APPROVAL_ENABLED": "${{ vars.DEYE_APPROVAL_ENABLED }}",
+            "DEYE_APPROVER_IDS": "${{ vars.DEYE_APPROVER_IDS }}",
+            "DEYE_APPROVER_LOGINS": "${{ vars.DEYE_APPROVER_LOGINS }}",
+            "DEYE_APPROVAL_CUTOFF": "${{ vars.DEYE_APPROVAL_CUTOFF }}",
+            "DEYE_TOU_WRITE_ENABLED": "${{ vars.DEYE_TOU_WRITE_ENABLED }}",
+            "DEYE_APP_ID": "${{ secrets.DEYE_APP_ID }}",
+            "DEYE_APP_SECRET": "${{ secrets.DEYE_APP_SECRET }}",
+            "DEYE_EMAIL": "${{ secrets.DEYE_EMAIL }}",
+            "DEYE_PASSWORD": "${{ secrets.DEYE_PASSWORD }}"
+          }
+        },
+        {
           "name": "Collect and atomically update private data",
           "if": "${{ !inputs.recommendation_dry_run }}",
           "run": "python -B scripts/collect_deye_daily.py",
@@ -84,10 +102,6 @@
             "DEYE_RECOMMENDATION_DRY_RUN": "${{ inputs.recommendation_dry_run }}",
             "DEYE_RECALCULATE_RECOMMENDATION": "${{ inputs.recalculate_recommendation }}",
             "DEYE_APPROVAL_ENABLED": "${{ vars.DEYE_APPROVAL_ENABLED }}",
-            "DEYE_APPROVER_IDS": "${{ vars.DEYE_APPROVER_IDS }}",
-            "DEYE_APPROVER_LOGINS": "${{ vars.DEYE_APPROVER_LOGINS }}",
-            "DEYE_APPROVAL_CUTOFF": "${{ vars.DEYE_APPROVAL_CUTOFF }}",
-            "DEYE_APPROVAL_WORKFLOW_TOKEN": "${{ vars.DEYE_APPROVAL_ENABLED == 'true' && !inputs.recommendation_dry_run && secrets.DEYE_APPROVAL_WORKFLOW_TOKEN || '' }}",
             "DEYE_DATA_REPOSITORY": "${{ vars.DEYE_DATA_OWNER || github.repository_owner }}/DeyeCloud-data",
             "DEYE_DATA_TOKEN": "${{ vars.DEYE_DATA_AUTH_MODE == 'pat' && secrets.DEYE_DATA_TOKEN || steps.app-token.outputs.token }}"
           }
