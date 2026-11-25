@@ -186,6 +186,15 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours, stress_hours_
 
     reference = evaluate(current)
     peak_hours = {row.hour for row in hours if row.band == "peak"}
+    tariff = [start for start, _, _ in cfg["weekday_periods"]]
+    first_day = hours[0].stamp[:10] if hours else None
+    required_starts = set(tariff) if any(
+        row.stamp[:10] == first_day and row.band != "valley" for row in hours) else set()
+    if len(required_starts) > len(current):
+        raise ValueError("TOU_TARIFF_PERIODS_EXCEED_SLOTS")
+
+    def aligned(plan):
+        return required_starts.issubset(period.hour for period in plan)
 
     def peak_charge_windows(plan):
         return {hour for hour in peak_hours if plan[bisect_right(
@@ -194,6 +203,8 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours, stress_hours_
     def eligible(plan):
         if plan == current:
             return not must_raise
+        if not aligned(plan):
+            return False
         if any(period.soc < minimum for period in plan):
             return False
         if peak_charge_windows(plan) - peak_charge_windows(current):
@@ -219,27 +230,54 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours, stress_hours_
                 or min(avoided) + EPS >= cfg["minimum_avoided_grid_charge_kwh"]
                 and min(savings) >= -EPS and min(invoice_savings) >= -EPS)
 
-    night_plans = {current}
     starts = [p.hour for p in current]
-    indices = {bisect_right(starts, hour) - 1 for hour in night_hours}
-    active_hours = {hour for hour in range(24) if bisect_right(starts, hour) - 1 in indices}
-    if active_hours == night_hours:
-        for soc in targets:
-            if soc >= night_minimum:
-                night_plans.add(tuple(replace(p, soc=soc, grid=True) if i in indices else p
-                                       for i, p in enumerate(current)))
-    night = min(filter(eligible, night_plans), key=score, default=current)
-    tariff = [start for start, _, _ in cfg["weekday_periods"]]
-    seeds = {current, night}
-    if len(tariff) == 6:
+    seeds = {current} if aligned(current) else set()
+    if required_starts:
+        extra_count = len(current) - len(required_starts)
+        if extra_count == 1:
+            # Seed each band that can contain the sixth TOU period. Search can
+            # move that extra start inside the band without crossing a tariff.
+            extras = []
+            for left, right in zip(tariff, [*tariff[1:], 24]):
+                if right - left > 1:
+                    split = next((hour for hour in starts if left < hour < right), (left + right) // 2)
+                    extras.append({split})
+        else:
+            available = dict.fromkeys([*starts, *range(24)])
+            optional = [hour for hour in available if hour not in required_starts]
+            extras = [set(optional[:extra_count])]
+        for extra in extras:
+            seeds.add(tuple(replace(current[bisect_right(starts, hour) - 1], hour=hour)
+                            for hour in sorted(required_starts | extra)))
+    elif len(tariff) == 6:
         seeds.add(tuple(replace(p, hour=hour) for p, hour in zip(current, tariff)))
-    candidates = set(seeds) | night_plans
+
+    night_plans = {current}
+    for base in (seeds if required_starts else {current}):
+        boundaries = [p.hour for p in base]
+        indices = {bisect_right(boundaries, hour) - 1 for hour in night_hours}
+        active_hours = {hour for hour in range(24) if bisect_right(boundaries, hour) - 1 in indices}
+        if active_hours == night_hours:
+            for soc in targets:
+                if soc >= night_minimum:
+                    night_plans.add(tuple(replace(p, soc=soc, grid=True) if i in indices else p
+                                           for i, p in enumerate(base)))
+    night = min(filter(eligible, night_plans), key=score, default=current)
+    if aligned(night):
+        seeds.add(night)
+    candidates = {current, *seeds, *night_plans}
 
     def neighbors(plan, i):
         p = plan[i]
         previous = plan[i - 1].hour + 1 if i else 0
         following = plan[i + 1].hour if i < 5 else 24
-        for hour in sorted({p.hour, p.hour - 1, p.hour + 1, *tariff}):
+        if p.hour in required_starts:
+            hours_to_try = (p.hour,)
+        elif required_starts:
+            hours_to_try = range(previous, following)
+        else:
+            hours_to_try = sorted({p.hour, p.hour - 1, p.hour + 1, *tariff})
+        for hour in hours_to_try:
             if previous <= hour < following:
                 for soc in targets:
                     if soc < minimum:

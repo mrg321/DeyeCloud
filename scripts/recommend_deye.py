@@ -749,6 +749,8 @@ def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetc
             raise ValueError("INVALID_OR_STALE_SOC")
         periods = read_periods(snapshot)
         limits = model_limits(snapshot, config)
+        if day_type(target, config) == "weekday" and len(config["weekday_periods"]) > len(periods):
+            raise ValueError("TOU_TARIFF_PERIODS_EXCEED_SLOTS")
         if len(selected) < config["min_profiles"]:
             raise ValueError("INSUFFICIENT_HOUSEHOLD_PROFILES")
         profile, stress_profiles = consumption_profiles(selected)

@@ -275,6 +275,15 @@ Se evalúan el escenario central y cuatro combinaciones de incertidumbre de FV y
 
 La reserva, la autonomía de respaldo, los objetivos discretos, las eficiencias, las tarifas, el calendario y los márgenes de previsión se toman de la configuración de recomendación existente. La potencia de batería se limita además por las corrientes configuradas leídas. Esas corrientes no reflejan necesariamente la limitación instantánea del BMS por tensión, temperatura o estado de carga. La simulación aplica los límites de potencia en pasos de 15 minutos cuando el perfil histórico tiene cobertura suficiente. Los picos más breves se promedian dentro de cada paso. El modelo tampoco incluye recuperaciones autónomas de seguridad ni venta desde batería. La compensación fija opcional no incorpora límites mensuales, impuestos ni batería virtual. Debe permanecer deshabilitada cuando esas reglas puedan afectar a la decisión.
 
+Para un día objetivo laborable, todo plan TOU nuevo conserva los inicios de
+las franjas de `weekday_periods`. Con cinco franjas, el sexto inicio divide
+una sola franja y los otros cuatro tramos coinciden con sus respectivas
+franjas tarifarias. Con seis franjas, los seis inicios coinciden. En fines
+de semana y festivos el valle de todo el día deja libres los inicios TOU.
+La configuración vigente se usa como referencia incluso si cruza un límite
+tarifario. Si ninguna propuesta válida supera las comprobaciones, se conserva
+la configuración vigente.
+
 Solo se simulan cambios en inicio, SOC y Grid Charge. Los seis inicios se interpretan como un ciclo continuo. La última fila acaba en el primer inicio del siguiente día, incluida la representación de medianoche como `0000` en el modelo. Las capturas con granularidad inferior a una hora o con generador se descartan. El fabricante documenta `Power` como un máximo de descarga, por lo que se usa como límite leído y se mantiene fijo por fila. Sell, modo de trabajo, parámetros de seguridad, corrientes y red quedan fuera de los planes. Las lecturas públicas del API y la captura privada permiten confirmar los campos devueltos, pero no verifican el comportamiento de la versión instalada al cambiar parámetros durante un periodo activo.
 
 - [Manual Deye SUN-3.6–8K-SG05LP1-EU](https://www.deyeinverter.com/deyeinverter/2026/01/30/rand/2781/%E3%80%90b%E3%80%91manual_sun-3.6-8k-sg05lp1-eu_20260130_en.pdf)

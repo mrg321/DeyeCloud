@@ -116,7 +116,36 @@ class TouTests(TestCase):
 
     def test_night_charge_can_reach_100(self):
         result = self.compare([0.2] * 8 + [3] * 16, initial=30)
-        self.assertEqual([period["soc"] for period in result["night"]["periods"][:2]], [100, 100])
+        periods = result["night"]["periods"]
+        self.assertEqual([period["time"] for period in periods],
+                         ["0000", "0800", "1000", "1400", "1800", "2200"])
+        self.assertEqual(periods[0]["soc"], 100)
+        self.assertEqual(periods[1]["soc"], 30)
+
+    def test_five_tariff_bands_keep_every_boundary_and_split_only_one(self):
+        self.config["weekday_periods"] = [
+            [0, 8, "valley"], [8, 10, "flat"], [10, 14, "peak"],
+            [14, 18, "flat"], [18, 24, "peak"],
+        ]
+        result = self.compare([0.2] * 8 + [3] * 16, initial=30)
+        required = {"0000", "0800", "1000", "1400", "1800"}
+        for name in ("night", "full"):
+            starts = {period["time"] for period in result[name]["periods"]}
+            self.assertTrue(required <= starts)
+            self.assertEqual(len(starts - required), 1)
+
+    def test_six_tariffs_do_not_force_reconfiguration_without_benefit(self):
+        self.config.update(minimum_saving_eur=100, minimum_avoided_grid_charge_kwh=100)
+        result = self.compare([0.5] * 24)
+        self.assertEqual(result["full"]["periods"], [p.record() for p in self.periods])
+
+    def test_weekend_can_optimize_without_weekday_boundaries(self):
+        self.periods = tuple(Period(hour, 100, hour < 8, 8000)
+                             for hour in (0, 5, 8, 13, 17, 21))
+        result = self.compare([0.3] * 24, sunny=True, weekend=True, initial=30)
+        self.assertGreater(result["full"]["avoided_grid_charge_kwh"], 0)
+        self.assertNotEqual([p["time"] for p in result["full"]["periods"]],
+                            ["0000", "0800", "1000", "1400", "1800", "2200"])
 
     def test_reduces_unnecessary_grid_charge(self):
         self.periods = (Period(0, 100, True, 8000), Period(5, 100, True, 8000), *self.periods[2:])
