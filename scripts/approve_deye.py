@@ -180,7 +180,14 @@ def tou_issue_text(payload, identity, result, forecast):
                             for value in values)
             lines.extend([f"{title} · {low:.3f} a {high:.3f}", "", f"`{graph}`", ""])
         lines += ["</details>"]
-    lines += ["", result["decision_reason"]]
+    reason = result["decision_reason"]
+    if reason == "TOU_TARIFF_ALIGNMENT_REQUIRED":
+        lines += ["", "El horario vigente cruza límites tarifarios. La propuesta corrige "
+                  "el encaje aunque no alcance el umbral de ahorro."]
+    elif reason == "TOU_TARIFF_ALIGNMENT_UNREACHABLE":
+        lines += ["", "El horario vigente cruza límites tarifarios y no se encontró "
+                  "un plan alineado que cumpla las comprobaciones operativas."]
+    lines += ["", reason]
     if execution:
         lines += ["", "~~~json", json.dumps(payload["write_body"], indent=2), "~~~"]
     if payload["actionable"]:

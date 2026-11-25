@@ -134,8 +134,23 @@ class TouTests(TestCase):
             self.assertTrue(required <= starts)
             self.assertEqual(len(starts - required), 1)
 
-    def test_six_tariffs_do_not_force_reconfiguration_without_benefit(self):
+    def test_tariff_alignment_can_require_change_without_savings(self):
         self.config.update(minimum_saving_eur=100, minimum_avoided_grid_charge_kwh=100)
+        profiles = [(self.day - timedelta(days=i), [0.5] * 24, {}) for i in (7, 14, 21)]
+        report = tou_recommendation(self.day, self.now, weather(self.day), profiles,
+                                    self.snapshot, self.config, fetch=weather)
+        self.assertEqual(report["decision"], "review")
+        self.assertEqual(report["decision_reason"], "TOU_TARIFF_ALIGNMENT_REQUIRED")
+        self.assertFalse(report["tariff_alignment"]["current_aligned"])
+        self.assertTrue(report["tariff_alignment"]["proposed_aligned"])
+        proposals = report["strategies"]["full"]["periods"]
+        self.assertEqual([p["time"] for p in proposals],
+                         ["0000", "0800", "1000", "1400", "1800", "2200"])
+
+    def test_already_aligned_schedule_still_requires_economic_benefit(self):
+        self.config.update(minimum_saving_eur=100, minimum_avoided_grid_charge_kwh=100)
+        self.periods = tuple(Period(hour, 30, hour < 8, 8000)
+                             for hour in (0, 8, 10, 14, 18, 22))
         result = self.compare([0.5] * 24)
         self.assertEqual(result["full"]["periods"], [p.record() for p in self.periods])
 

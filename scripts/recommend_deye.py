@@ -823,6 +823,14 @@ def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetc
     season = (target.month % 12) // 3
     comparable = sum(day_type(row[0], config) == kind and (row[0].month % 12) // 3 == season
                      for row in selected)
+    alignment = outcome["tariff_alignment"]
+    decision_reason = {
+        "requires_change": "NIGHT_SOC_MINIMUM_REQUIRES_CHANGE",
+        "unreachable": "NIGHT_SOC_UNREACHABLE",
+    }.get(night["status"], "SIMULATED_TOU_CHANGE" if changes else "NO_ROBUST_TOU_CHANGE")
+    if not alignment["current_aligned"]:
+        decision_reason = ("TOU_TARIFF_ALIGNMENT_REQUIRED" if alignment["proposed_aligned"]
+                           else "TOU_TARIFF_ALIGNMENT_UNREACHABLE")
     return {**report, **outcome, "current_soc": soc, "soc_measured_at": measured_at,
             "estimated_midnight_soc": initial, "minimum_soc": limits[0], "issues": issues,
             "horizon": {"start": hours[0].stamp, "hours": len(hours)},
@@ -830,10 +838,7 @@ def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetc
                            and comparable >= config["min_profiles"] else "low"),
             "snapshot_sha256": hashlib.sha256(canonical(snapshot["parameters"])).hexdigest(),
             "changes": changes, "decision": "review" if changes else "hold",
-            "decision_reason": {
-                "requires_change": "NIGHT_SOC_MINIMUM_REQUIRES_CHANGE",
-                "unreachable": "NIGHT_SOC_UNREACHABLE",
-            }.get(night["status"], "SIMULATED_TOU_CHANGE" if changes else "NO_ROBUST_TOU_CHANGE"),
+            "decision_reason": decision_reason,
             "evening": {"load_kwh": sum(row.load for row in evening), "pv_kwh": sum(row.pv for row in evening),
                         "deficit_kwh": deficit, "required_start_soc": evening_required,
                         "extra_flat_import_cost_eur": sum(

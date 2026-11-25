@@ -151,6 +151,14 @@ def simulate(hours, periods, initial, limits, cfg, *, detail=False, checkpoint=N
             **({"night_end_soc": checkpoint_soc} if checkpoint is not None else {})}
 
 
+def tariff_boundaries(hours, config):
+    if not hours:
+        return set()
+    first_day = hours[0].stamp[:10]
+    return {start for start, _, _ in config["weekday_periods"]} if any(
+        row.stamp[:10] == first_day and row.band != "valley" for row in hours) else set()
+
+
 def optimize(hours, current, initial, limits, cfg, *, night_hours, stress_hours_profiles=(),
              checkpoint=None, required_soc=None):
     """Coordinate search from current, tariff and night-only configurations."""
@@ -187,14 +195,14 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours, stress_hours_
     reference = evaluate(current)
     peak_hours = {row.hour for row in hours if row.band == "peak"}
     tariff = [start for start, _, _ in cfg["weekday_periods"]]
-    first_day = hours[0].stamp[:10] if hours else None
-    required_starts = set(tariff) if any(
-        row.stamp[:10] == first_day and row.band != "valley" for row in hours) else set()
+    required_starts = tariff_boundaries(hours, cfg)
     if len(required_starts) > len(current):
         raise ValueError("TOU_TARIFF_PERIODS_EXCEED_SLOTS")
 
     def aligned(plan):
         return required_starts.issubset(period.hour for period in plan)
+
+    must_align = not aligned(current)
 
     def peak_charge_windows(plan):
         return {hour for hour in peak_hours if plan[bisect_right(
@@ -202,7 +210,7 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours, stress_hours_
 
     def eligible(plan):
         if plan == current:
-            return not must_raise
+            return not must_raise and not must_align
         if not aligned(plan):
             return False
         if any(period.soc < minimum for period in plan):
@@ -221,7 +229,7 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours, stress_hours_
                     return False
             if night_soc(plan) + EPS < required_soc:
                 return False
-        if must_raise:
+        if must_raise or must_align:
             return True
         savings = [a["objective_eur"] - b["objective_eur"] for a, b in zip(reference, outcomes)]
         avoided = [a["grid_charge_kwh"] - b["grid_charge_kwh"] for a, b in zip(reference, outcomes)]
@@ -336,5 +344,11 @@ def comparison(hours, current, initial, limits, config, *, night_hours, stress_h
                                     if row["hour"][11:16] == "18:00"), None)
         result["soc_at_22"] = next((row["soc_start"] for row in result["hours"]
                                     if row["hour"][11:16] == "22:00"), None)
-    return {"strategies": results, "evaluated_plans": evaluated,
+    required = tariff_boundaries(hours, config)
+    alignment = {
+        "required_starts": [f"{hour:02d}00" for hour in sorted(required)],
+        "current_aligned": required.issubset(period.hour for period in current),
+        "proposed_aligned": required.issubset(period.hour for period in plans["full"]),
+    }
+    return {"strategies": results, "evaluated_plans": evaluated, "tariff_alignment": alignment,
             **({"night_soc": constraint} if constraint else {})}

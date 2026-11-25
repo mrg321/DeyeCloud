@@ -281,8 +281,12 @@ una sola franja y los otros cuatro tramos coinciden con sus respectivas
 franjas tarifarias. Con seis franjas, los seis inicios coinciden. En fines
 de semana y festivos el valle de todo el día deja libres los inicios TOU.
 La configuración vigente se usa como referencia incluso si cruza un límite
-tarifario. Si ninguna propuesta válida supera las comprobaciones, se conserva
-la configuración vigente.
+tarifario. Si no está alineada, el recomendador propone corregir ese encaje
+aunque el ahorro estimado quede por debajo del umbral habitual. El Issue
+muestra el motivo y el coste estimado. Se mantienen las comprobaciones de
+reserva, SOC nocturno y carga en punta. Si ningún plan alineado las cumple,
+el informe indica que no se ha encontrado un encaje viable y conserva el
+horario vigente.
 
 Solo se simulan cambios en inicio, SOC y Grid Charge. Los seis inicios se interpretan como un ciclo continuo. La última fila acaba en el primer inicio del siguiente día, incluida la representación de medianoche como `0000` en el modelo. Las capturas con granularidad inferior a una hora o con generador se descartan. El fabricante documenta `Power` como un máximo de descarga, por lo que se usa como límite leído y se mantiene fijo por fila. Sell, modo de trabajo, parámetros de seguridad, corrientes y red quedan fuera de los planes. Las lecturas públicas del API y la captura privada permiten confirmar los campos devueltos, pero no verifican el comportamiento de la versión instalada al cambiar parámetros durante un periodo activo.
 
