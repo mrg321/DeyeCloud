@@ -1,5 +1,6 @@
 from copy import deepcopy
 from datetime import timedelta
+import json
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 
@@ -120,6 +121,30 @@ class TouWriteTests(unittest.TestCase):
         self.assertEqual(decision, "SIMULATION_APPROVED")
         self.assertEqual(self.execute(event), "NO_EXECUTABLE_APPROVAL")
         self.client_factory.assert_not_called()
+
+    def test_issue_body_remains_stable_after_canonical_storage(self):
+        approval.notify(self.store, DAY, "23:00", NOW, REVIEWERS, execution_enabled=True)
+        identity, event = self.store.event()
+        path = approval.proposal_path(DAY, identity)
+        self.store.entries[path] = json.loads(approval.canonical(self.store.entries[path]))
+        self.assertEqual(approval.decide(self.store, event, REVIEWERS, NOW), "APPROVED")
+
+    def test_pending_issue_with_previous_json_order_can_be_approved(self):
+        report_path = f"recommendations/{DAY}.json"
+        self.store.entries[report_path] = json.loads(approval.canonical(self.store.entries[report_path]))
+        approval.notify(self.store, DAY, "23:00", NOW, REVIEWERS, execution_enabled=True)
+        identity, event = self.store.event()
+        path = approval.proposal_path(DAY, identity)
+        record = self.store.entries[path]
+        report = self.store.entries[report_path]
+        issue = self.store.issues[record["issue"]]
+        legacy = approval.issue_text(record["payload"], identity, report, sort_write_keys=False)
+        self.assertNotEqual(issue["body"], legacy)
+        self.store.entries[path] = json.loads(approval.canonical(record))
+        issue["body"] = legacy.replace('"soc": 65', '"soc": 64', 1)
+        self.assertEqual(approval.decide(self.store, event, REVIEWERS, NOW), "ISSUE_CHANGED_OR_CLOSED")
+        issue["body"] = legacy
+        self.assertEqual(approval.decide(self.store, event, REVIEWERS, NOW), "APPROVED")
 
     def test_rejected_approval_never_contacts_inverter(self):
         _, event, decision = self.vote(command="reject")

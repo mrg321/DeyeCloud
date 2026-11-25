@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 
+from collect_deye_daily import CollectionError
 from deye_history_quality import MADRID
 from deye_private_store import GitHubPrivateStore, canonical
 from deye_tou import read_periods
@@ -52,9 +53,10 @@ def reviewer_ids(raw):
     return set(identities)
 
 
-def issue_text(payload, identity, report):
+def issue_text(payload, identity, report, *, sort_write_keys=True):
     if payload["schema_version"] == 2:
-        return tou_issue_text(payload, identity, report["tou_simulation"], report["forecast"])
+        return tou_issue_text(payload, identity, report["tou_simulation"], report["forecast"],
+                              sort_write_keys=sort_write_keys)
     result, forecast = report["recommendation"], report["forecast"]
 
     def value(record, key, suffix=""):
@@ -127,7 +129,7 @@ def night_soc_text(night):
     return message
 
 
-def tou_issue_text(payload, identity, result, forecast):
+def tou_issue_text(payload, identity, result, forecast, *, sort_write_keys=True):
     execution = payload.get("execution_enabled") is True
     title = "Aplicación TOU" if execution else "Simulación TOU"
     description = ("Aprobar autoriza el envío del JSON mostrado al inversor indicado."
@@ -189,10 +191,28 @@ def tou_issue_text(payload, identity, result, forecast):
                   "un plan alineado que cumpla las comprobaciones operativas."]
     lines += ["", reason]
     if execution:
-        lines += ["", "~~~json", json.dumps(payload["write_body"], indent=2), "~~~"]
+        lines += ["", "~~~json", json.dumps(payload["write_body"], indent=2,
+                                          sort_keys=sort_write_keys), "~~~"]
     if payload["actionable"]:
         lines += ["", "~~~text", *(f"/deye {command} {payload['date']} {identity}" for command in DECISIONS), "~~~"]
     return "\n".join(lines)
+
+
+def issue_body_matches(store, body, payload, identity, report):
+    if body == issue_text(payload, identity, report):
+        return True
+    if payload.get("execution_enabled") is not True:
+        return False
+    # Issues emitted before stable rendering used the order in which the
+    # binding built the request. Recover that exact text for pending Issues.
+    try:
+        binding = execution_binding(store, payload, report)
+    except (CollectionError, KeyError, TypeError, ValueError):
+        return False
+    if any(payload.get(key) != value for key, value in binding.items()):
+        return False
+    legacy = {**payload, "write_body": binding["write_body"]}
+    return body == issue_text(legacy, identity, report, sort_write_keys=False)
 
 
 def tou_preflight(payload, snapshot):
@@ -356,8 +376,8 @@ def decide(store, event, reviewers, now):
     if report is None or digest(report) != payload["report_sha256"]:
         return "REPORT_CHANGED"
     issue = store._request("GET", f"/issues/{record['issue']}")
-    if (issue["state"] != "open" or issue["body"] != issue_text(payload, identity, report)
-            or issue["title"] != f"Deye · {day} · {identity[:16]}"):
+    if (issue["state"] != "open" or issue["title"] != f"Deye · {day} · {identity[:16]}"
+            or not issue_body_matches(store, issue["body"], payload, identity, report)):
         return "ISSUE_CHANGED_OR_CLOSED"
     if created > now or created < datetime.fromisoformat(record["created_at"]).replace(microsecond=0):
         return "INVALID_EVENT_TIME"
