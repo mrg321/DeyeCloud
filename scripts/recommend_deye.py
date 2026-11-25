@@ -3,6 +3,7 @@
 import argparse
 from datetime import date, datetime, timedelta, timezone
 import hashlib
+from itertools import zip_longest
 import json
 import os
 from pathlib import Path
@@ -231,28 +232,70 @@ def load_profile(samples, day, consumption, *, power_key="TotalConsumptionPower"
     return LoadProfile(hourly, quarters)
 
 
+LOAD_WEIGHT_HALF_LIFE_DAYS = 7
+
+
+def recent_consumption_median(selected):
+    newest = max(day for day, _, _ in selected)
+    weighted = sorted((sum(profile), 2 ** (-(newest - day).days / LOAD_WEIGHT_HALF_LIFE_DAYS))
+                      for day, profile, _ in selected)
+    halfway = sum(weight for _, weight in weighted) / 2
+    cumulative = 0
+    for index, (total, weight) in enumerate(weighted):
+        cumulative += weight
+        if cumulative > halfway:
+            return total
+        if cumulative == halfway:
+            return (total + weighted[index + 1][0]) / 2
+    return weighted[-1][0]
+
+
 def consumption_profiles(selected):
-    """Preserve the hourly median and use coherent historical shapes for short peaks."""
+    """Scale the central shape by recent daily demand; retain complete stress days."""
     profiles = [row[1] for row in selected]
     hourly = [median(profile[h] for profile in profiles) for h in range(24)]
+    daily_total = recent_consumption_median(selected)
+    shape_total = sum(hourly)
+    if shape_total == 0 and daily_total > 0:
+        hourly = min(profiles, key=lambda profile: abs(sum(profile) - daily_total))
+        shape_total = sum(hourly)
+    scale = daily_total / shape_total if shape_total else 1
+    scaled = [value * scale for value in hourly]
+    high = max(profiles, key=sum)
+    stress = [high] if sum(high) >= daily_total and any(
+        abs(a - b) > 1e-9 for a, b in zip(high, scaled)) else []
     detailed = [profile for profile in profiles if any(getattr(profile, "quarters", ()))]
-    if not detailed:
-        return LoadProfile(hourly, [()] * 24), None
-    typical = min(detailed, key=lambda profile: sum(abs(a - b) for a, b in zip(profile, hourly)))
-    peak = max(detailed, key=lambda profile: (
-        max((value for parts in profile.quarters[5:12] for value in parts), default=0),
-        sum(profile[5:12]),
-    ))
-    quarters = [tuple(value * target / original for value in parts) if original else ()
-                for parts, target, original in zip(typical.quarters, hourly, typical)]
-    return LoadProfile(hourly, quarters), peak
+    quarters = [()] * 24
+    if detailed:
+        typical = min(detailed, key=lambda profile: sum(abs(a - b) for a, b in zip(profile, hourly)))
+        peak = max(detailed, key=lambda profile: (
+            max((value for parts in profile.quarters[5:12] for value in parts), default=0),
+            sum(profile[5:12]),
+        ))
+        if peak is not high or not stress:
+            stress.append(peak)
+        quarters = [tuple(value * target / original for value in parts) if original else ()
+                    for parts, target, original in zip(typical.quarters, scaled, typical)]
+    return LoadProfile(scaled, quarters), stress
 
 
-def history(store, target, config):
+def load_for_hours(profile, hours):
+    load = [profile[hour] for hour in hours]
+    if len(hours) == 24:
+        return load
+    total = sum(profile)
+    observed = sum(load)
+    if not observed:
+        return [total / len(hours)] * len(hours)
+    return [value * total / observed for value in load]
+
+
+def history(store, target, config, *, latest_complete=None):
     season = (target.month % 12) // 3
     kind = day_type(target, config)
     days = [target - timedelta(days=offset) for offset in range(2, config["history_days"] + 2)]
     days = [day for day in days if day_type(day, config) is not None
+            and (latest_complete is None or day <= latest_complete)
             and f"daily/{day}.json" in store.entries and f"intraday/{day}.json" in store.entries]
     days.sort(key=lambda day: (day_type(day, config) != kind,
                                (day.month % 12) // 3 != season, target - day))
@@ -423,8 +466,8 @@ def recommendation(target, now, weather, selected, snapshot, config):
         required_soc = max(required_soc, night_minimum)
     stamps = hour_starts(target)
     hours = [datetime.fromtimestamp(stamp, MADRID).hour for stamp in stamps]
-    profile, peak_profile = consumption_profiles(selected) if selected else (None, None)
-    load = [profile[h] for h in hours] if profile else None
+    profile, stress_profiles = consumption_profiles(selected) if selected else (None, ())
+    load = load_for_hours(profile, hours) if profile else None
     historical = {}
     for key in ENERGY_FIELDS:
         values = [row[2][key] for row in selected if row[2][key] is not None]
@@ -478,13 +521,12 @@ def recommendation(target, now, weather, selected, snapshot, config):
     scenarios = [(profile, 1, 1)] + [(profile, 1 + load_sign * config["load_uncertainty"],
                                      1 + pv_sign * config["pv_uncertainty"])
                             for load_sign in (-1, 1) for pv_sign in (-1, 1)]
-    if peak_profile is not None:
-        scenarios.append((peak_profile, 1, 1 - config["pv_uncertainty"]))
+    scenarios.extend((stress, 1, 1 - config["pv_uncertainty"]) for stress in stress_profiles)
     outcomes = {}
     candidates = [(x, x) for x in sorted({*config["targets"], ceil(max(night_minimum, required_soc))})
                   if x >= config["reserve_soc"]]
     for setting in dict.fromkeys([tuple(baseline)] + candidates):
-        outcomes[setting] = [simulate(hours, [shape[h] * lf for h in hours], [x * pf for x in pv],
+        outcomes[setting] = [simulate(hours, [value * lf for value in load_for_hours(shape, hours)], [x * pf for x in pv],
                                       initial, setting, kind, config, profile=shape, night_end=night_end)
                              for shape, lf, pf in scenarios]
     reference = outcomes[tuple(baseline)]
@@ -632,13 +674,14 @@ def tou_hours(day, profile, weather, config):
     if kind is None or len(records) != len(expected):
         raise ValueError("INCOMPLETE_TOU_FORECAST")
     result = []
-    for stamp, row in zip(expected, records):
+    loads = load_for_hours(profile, [stamp.hour for stamp in expected])
+    for stamp, row, load in zip(expected, records, loads):
         pv = numeric(row.get("pv_kwh"))
         if row.get("hour") != stamp.isoformat() or pv is None or pv < 0:
             raise ValueError("INCOMPLETE_TOU_FORECAST")
         band = tariff_band(stamp.hour, kind, config)
         shares = profile.shares(stamp.hour) if isinstance(profile, LoadProfile) else ()
-        result.append(Hour(stamp.isoformat(), stamp.hour, profile[stamp.hour], pv, config["prices"][band],
+        result.append(Hour(stamp.isoformat(), stamp.hour, load, pv, config["prices"][band],
                            band, load_shares=shares))
     return result
 
@@ -696,7 +739,7 @@ def replay_tou_day(day, daily, intraday, reference_snapshot, config):
     return result
 
 
-def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetch):
+def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetch, history_for=None):
     report = {"decision": "abstain", "confidence": "low", "mode": "six_period_simulation",
               "execution_enabled": False}
 
@@ -708,9 +751,9 @@ def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetc
         limits = model_limits(snapshot, config)
         if len(selected) < config["min_profiles"]:
             raise ValueError("INSUFFICIENT_HOUSEHOLD_PROFILES")
-        profile, peak_profile = consumption_profiles(selected)
+        profile, stress_profiles = consumption_profiles(selected)
         hours = tou_hours(target, profile, weather, config)
-        peak_hours = tou_hours(target, peak_profile, weather, config) if peak_profile is not None else None
+        stress_hours = [tou_hours(target, stress, weather, config) for stress in stress_profiles]
     except (ValueError, TypeError, KeyError) as error:
         return {**report, "decision_reason": str(error)}
 
@@ -731,17 +774,18 @@ def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetc
         following = target + timedelta(days=1)
         try:
             following_kind = day_type(following, config)
-            next_profiles = [row for row in selected if day_type(row[0], config) == following_kind]
+            next_profiles = (history_for(following) if history_for else
+                             [row for row in selected if day_type(row[0], config) == following_kind])
             if following_kind is None or len(next_profiles) < config["min_profiles"]:
                 raise ValueError("INSUFFICIENT_SECOND_DAY_PROFILES")
             second = fetch(following, config)
             if second.get("confidence") != "medium":
                 raise ValueError("LOW_CONFIDENCE")
-            next_profile, next_peak = consumption_profiles(next_profiles)
+            next_profile, next_stress = consumption_profiles(next_profiles)
             next_hours = tou_hours(following, next_profile, second, config)
-            if peak_hours is not None or next_peak is not None:
-                peak_hours = (peak_hours if peak_hours is not None else hours.copy()) + (
-                    tou_hours(following, next_peak, second, config) if next_peak is not None else next_hours)
+            next_stress_hours = [tou_hours(following, stress, second, config) for stress in next_stress]
+            stress_hours = [(first if first is not None else hours) + (second if second is not None else next_hours)
+                            for first, second in zip_longest(stress_hours, next_stress_hours)]
             hours += next_hours
         except (requests.RequestException, ValueError, KeyError, TypeError, IndexError):
             issues.append("SECOND_DAY_FORECAST_UNAVAILABLE")
@@ -750,7 +794,7 @@ def tou_recommendation(target, now, weather, selected, snapshot, config, *, fetc
     required_soc = max(configured_minimum, limits[0], config["verified_device_minimum_soc"] or 0)
     checkpoint = sum(row.stamp[:10] == str(target) and row.hour < night_end for row in hours)
     outcome = comparison(hours, periods, initial, limits, config, night_hours=night_window(config),
-                         peak_hours_profile=peak_hours, checkpoint=checkpoint, required_soc=required_soc)
+                         stress_hours_profiles=stress_hours, checkpoint=checkpoint, required_soc=required_soc)
     night = outcome["night_soc"]
     night.update(hour=night_end, next_band=next_band)
     reference, proposed = (outcome["strategies"][key] for key in ("current", "full"))
@@ -834,7 +878,10 @@ def run(store, now, *, dry_run=False, recalculate=False, fetch=forecast):
               "history_commit": store.head, "forecast": weather,
               "recommendation": recommendation(target, now, weather, selected, snapshot, config)}
     if config["tou_simulation_enabled"]:
-        result["tou_simulation"] = tou_recommendation(target, now, weather, selected, snapshot, config, fetch=fetch)
+        result["tou_simulation"] = tou_recommendation(
+            target, now, weather, selected, snapshot, config, fetch=fetch,
+            history_for=lambda day: history(store, day, config, latest_complete=today - timedelta(days=1)),
+        )
     if dry_run:
         return "DRY_RUN_COMPLETED"
     changes = {path: result}

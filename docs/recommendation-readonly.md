@@ -151,16 +151,22 @@ para evaluarlo. El TOU actual se simula como referencia aunque supere el 80 %.
   conservan los kWh de FV históricos como referencia para comparar el modelo.
   PVGIS ofrece climatología para contrastar la producción a largo plazo.
   [PVGIS y año meteorológico típico](https://joint-research-centre.ec.europa.eu/photovoltaic-geographical-information-system-pvgis/using-pvgis-5/pvgis-5-tools/pvgis-typical-meteorological-year-tmy-generator_en).
-- El consumo se estima con medianas horarias de hasta 12 días, priorizando tipo
-  de día y estación. Se integra `TotalConsumptionPower` con muestras de hasta
+- El consumo diario se estima con una mediana ponderada por recencia de
+  hasta 12 días completos. El peso se reduce a la mitad por cada 7 días
+  de antigüedad. Se prioriza el mismo tipo de día (laborable, fin de semana
+  o festivo) y la misma estación. Si faltan perfiles, se amplía a otras
+  estaciones del mismo tipo y después al histórico disponible. Se integra
+  `TotalConsumptionPower` con muestras de hasta
   diez minutos de separación y se exige un mínimo de 45 minutos observados por
   hora. Se contrasta el resultado con el campo diario `Consumption` y se ajusta
   a ese total si la diferencia está dentro del 35 %. Importación, generación,
   carga y descarga se conservan como magnitudes independientes.
-  La simulación reparte la mediana de cada hora según el perfil de 15 minutos
-  de un día histórico cercano a la mediana y prueba también el día comparable
-  con el mayor pico entre las 05:00 y las 12:00, junto con el escenario de FV
-  baja. Cada cuarto requiere al menos diez minutos cubiertos por muestras. Si
+  La curva central conserva la forma de las medianas horarias y el reparto
+  de 15 minutos de un día representativo. Se multiplican horas y cuartos
+  por el mismo factor para que sumen el nuevo total. Con FV baja se prueban
+  también los días completos de mayor consumo y de mayor pico entre las
+  05:00 y las 12:00, cuando aportan escenarios distintos. Cada cuarto
+  requiere al menos diez minutos cubiertos por muestras. Si
   falta cobertura en algún cuarto, esa hora se simula en un único paso. La FV
   prevista se reparte uniformemente dentro de la hora y el informe sigue
   mostrando totales horarios.

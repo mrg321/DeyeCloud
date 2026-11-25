@@ -320,9 +320,32 @@ class ReadOnlyRecommendationTests(unittest.TestCase):
             [(day, typical, {}), (day, typical, {}), (day, peaked, {})])
 
         self.assertAlmostEqual(profile[8], typical[8])
-        self.assertIs(stress, peaked)
-        self.assertAlmostEqual(sum(stress.quarters[8]), stress[8])
-        self.assertGreater(stress.shares(8)[1], 0.5)
+        self.assertEqual(len(stress), 1)
+        self.assertIs(stress[0], peaked)
+        self.assertAlmostEqual(sum(stress[0].quarters[8]), stress[0][8])
+        self.assertGreater(stress[0].shares(8)[1], 0.5)
+
+    def test_recent_daily_median_scales_each_quarter_and_keeps_high_day(self):
+        day = TARGET - timedelta(days=2)
+
+        def flat(total):
+            hourly = total / 24
+            return recommend_deye.LoadProfile([hourly] * 24, [
+                tuple(hourly * share for share in (0.1, 0.2, 0.3, 0.4))
+            ] * 24)
+
+        high = flat(45)
+        central, stress = recommend_deye.consumption_profiles([
+            (day, flat(30), {}), (day - timedelta(days=7), flat(23.6), {}),
+            (day - timedelta(days=14), flat(20), {}), (day - timedelta(days=21), high, {}),
+        ])
+        self.assertAlmostEqual(sum(central), 30)
+        self.assertAlmostEqual(sum(map(sum, central.quarters)), 30)
+        for actual, share in zip(central.quarters[8], (0.1, 0.2, 0.3, 0.4)):
+            self.assertAlmostEqual(actual, 30 / 24 * share)
+        self.assertIs(stress[0], high)
+        self.assertAlmostEqual(sum(stress[0]), 45)
+        self.assertAlmostEqual(sum(recommend_deye.load_for_hours(central, [0, 1, *range(3, 24)])), 30)
 
     def test_cloud_high_load_vs_sun_low_load(self):
         config = settings()

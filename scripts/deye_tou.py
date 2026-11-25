@@ -151,16 +151,15 @@ def simulate(hours, periods, initial, limits, cfg, *, detail=False, checkpoint=N
             **({"night_end_soc": checkpoint_soc} if checkpoint is not None else {})}
 
 
-def optimize(hours, current, initial, limits, cfg, *, night_hours, peak_hours_profile=None,
+def optimize(hours, current, initial, limits, cfg, *, night_hours, stress_hours_profiles=(),
              checkpoint=None, required_soc=None):
     """Coordinate search from current, tariff and night-only configurations."""
     scenarios = [hours] + [
         [replace(row, load=row.load * (1 + load * cfg["load_uncertainty"]),
                  pv=row.pv * (1 + sun * cfg["pv_uncertainty"])) for row in hours]
         for load in (-1, 1) for sun in (-1, 1)]
-    if peak_hours_profile is not None:
-        scenarios.append([replace(row, pv=row.pv * (1 - cfg["pv_uncertainty"]))
-                          for row in peak_hours_profile])
+    scenarios.extend([replace(row, pv=row.pv * (1 - cfg["pv_uncertainty"])) for row in profile]
+                     for profile in stress_hours_profiles)
     minimum = ceil(max(limits[0], cfg["verified_device_minimum_soc"] or 0))
     night_minimum = ceil(max(minimum, cfg["minimum_night_soc"] if required_soc is None else required_soc))
     targets = sorted({minimum, night_minimum, 100, *cfg["targets"]})
@@ -280,11 +279,11 @@ def optimize(hours, current, initial, limits, cfg, *, night_hours, peak_hours_pr
     return plans, len(cache), constraint
 
 
-def comparison(hours, current, initial, limits, config, *, night_hours, peak_hours_profile=None,
+def comparison(hours, current, initial, limits, config, *, night_hours, stress_hours_profiles=(),
                checkpoint=None, required_soc=None):
     plans, evaluated, constraint = optimize(
         hours, current, initial, limits, config, night_hours=night_hours,
-        peak_hours_profile=peak_hours_profile, checkpoint=checkpoint, required_soc=required_soc)
+        stress_hours_profiles=stress_hours_profiles, checkpoint=checkpoint, required_soc=required_soc)
     results = {}
     for name, periods in plans.items():
         results[name] = {"periods": [period.record() for period in periods],
