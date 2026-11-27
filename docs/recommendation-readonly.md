@@ -135,9 +135,12 @@ para evaluarlo. El TOU actual se simula como referencia aunque supere el 80 %.
   convierten a Madrid y conservan el offset en días de 23 o 25 horas. La duración
   astronómica diaria UTC corresponde a la misma jornada solar en Madrid.
   [Documentación de Open-Meteo](https://open-meteo.com/en/docs).
-- **ECMWF IFS** (`ecmwf_ifs`) se usa si ICON-EU falla o devuelve datos
-  incompletos. La simulación utiliza la serie completa del modelo que superó
-  la validación y registra la previsión como no disponible si fallan ambos. Para
+- **ECMWF IFS** (`ecmwf_ifs`) se calcula en cada previsión y se usa en la
+  simulación si ICON-EU falla o devuelve datos incompletos. El JSON privado
+  guarda ambos resultados en `forecast.models` y el modelo operativo en
+  `forecast.model`. Si fallan ambos, la previsión queda como no disponible.
+  Los issues muestran las horas solares pico equivalentes de ambos modelos,
+  el porcentaje de pérdidas y el modelo operativo. Para
   comparar ambos modelos, consulta Single Runs por separado con `models=icon_eu`
   y `models=ecmwf_ifs`, la misma pasada `run` anterior a la recomendación y
   los mismos parámetros de ubicación, inclinación y acimut. Solicita

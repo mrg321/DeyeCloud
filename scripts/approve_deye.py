@@ -73,7 +73,8 @@ def issue_text(payload, identity, report, *, sort_write_keys=True):
         f"**SOC recomendado:** {value(result, 'recommended_soc', ' %')}",
         f"**Sol efectivo:** {value(forecast, 'sunshine_hours', ' h')}",
         f"**Producción FV:** {value(forecast, 'pv_kwh', ' kWh')}" + pv_forecast_explanation(forecast),
-        f"**Consumo previsto:** {value(result, 'expected_load_kwh', ' kWh')}",
+        f"**Consumo previsto:** {value(result, 'expected_load_kwh', ' kWh')}"
+        + consumption_explanation(forecast, result.get("expected_load_kwh")),
         f"**Aporte de batería 08:00–24:00:** {value(result, 'expected_battery_output_08_24_kwh', ' kWh')}",
         f"**Ahorro estimado:** {value(result, 'estimated_saving_eur', ' EUR')}",
         f"**Confianza:** {result['confidence']}",
@@ -99,6 +100,17 @@ def issue_text(payload, identity, report, *, sort_write_keys=True):
 
 def pv_forecast_explanation(forecast):
     # Older reports must still render exactly as they did when their issue was created.
+    if "models" in forecast:
+        names = {"icon_eu": "ICON-EU", "ecmwf_ifs": "ECMWF IFS"}
+        parts = []
+        for key, name in names.items():
+            estimate = forecast["models"].get(key)
+            hours = f"{estimate['irradiation_kwh_m2']:.2f} h" if estimate else "no disponible"
+            parts.append(f"{name} {hours}")
+        losses = forecast["pv_model"]["pv_losses"]
+        operational = names.get(forecast.get("model"), "no disponible")
+        return (f"\n\n**Horas solares pico equivalentes del día objetivo** · {' · '.join(parts)}"
+                f" · Pérdidas {losses:.1%} · Modelo en producción {operational}.")
     model = forecast.get("pv_model")
     if model is None:
         return ""
@@ -115,6 +127,13 @@ def pv_forecast_explanation(forecast):
         f"nominal de {model['pv_kwp']:g} kWp y por el factor (1 − {model['pv_losses']:.2%}), "
         f"lo que da **{forecast['pv_kwh']:.2f} kWh**."
     )
+
+
+def consumption_explanation(forecast, load):
+    if "models" not in forecast or load is None:
+        return ""
+    return ("\n\nEl consumo se estima con perfiles horarios de Deye de días comparables "
+            "y un total diario basado en la mediana ponderada, con más peso para los días recientes.")
 
 
 def night_soc_text(night):
@@ -154,7 +173,7 @@ def tou_issue_text(payload, identity, result, forecast, *, sort_write_keys=True)
         full, current = strategies["full"], strategies["current"]
         evening = result["evening"]
         lines += ["", f"Consumo estimado {full['load_kwh']:.2f} kWh · FV estimada {full['pv_kwh']:.2f} kWh"
-                  + pv_forecast_explanation(forecast),
+                  + pv_forecast_explanation(forecast) + consumption_explanation(forecast, full["load_kwh"]),
                   f"Ahorro neto estimado {full['avoided_net_cost_eur']:.2f} € · "
                   f"ahorro ajustado por SOC final {full['avoided_objective_eur']:.2f} €",
                   f"Ahorro frente a la estrategia nocturna {full['saving_vs_night_eur']:.2f} € · "
@@ -182,6 +201,8 @@ def tou_issue_text(payload, identity, result, forecast, *, sort_write_keys=True)
                             for value in values)
             lines.extend([f"{title} · {low:.3f} a {high:.3f}", "", f"`{graph}`", ""])
         lines += ["</details>"]
+    if not strategies and "models" in forecast:
+        lines.append(pv_forecast_explanation(forecast))
     reason = result["decision_reason"]
     if reason == "TOU_TARIFF_ALIGNMENT_REQUIRED":
         lines += ["", "El horario vigente cruza límites tarifarios. La propuesta corrige "

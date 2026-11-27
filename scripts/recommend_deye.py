@@ -109,10 +109,16 @@ def hour_starts(day):
 
 
 def forecast(day, config, *, get=requests.get):
-    try:
-        return forecast_with_model(day, config, WEATHER_MODEL, get)
-    except WEATHER_ERRORS:
-        return forecast_with_model(day, config, WEATHER_FALLBACK_MODEL, get)
+    models = {}
+    for model in (WEATHER_MODEL, WEATHER_FALLBACK_MODEL):
+        try:
+            models[model] = forecast_with_model(day, config, model, get)
+        except WEATHER_ERRORS:
+            models[model] = None
+    operational = models[WEATHER_MODEL] or models[WEATHER_FALLBACK_MODEL]
+    if operational is None:
+        raise ValueError("INCOMPLETE_OR_FAILED_FORECAST")
+    return {**operational, "models": models}
 
 
 def forecast_with_model(day, config, model, get):
@@ -878,7 +884,9 @@ def run(store, now, *, dry_run=False, recalculate=False, fetch=forecast):
         weather = dict(fetch(target, config))
     except WEATHER_ERRORS:
         weather = {"source": "Open-Meteo", "model": None, "confidence": "unavailable",
-                   "issues": ["INCOMPLETE_OR_FAILED_FORECAST"]}
+                   "issues": ["INCOMPLETE_OR_FAILED_FORECAST"],
+                   "models": dict.fromkeys((WEATHER_MODEL, WEATHER_FALLBACK_MODEL)),
+                   "pv_model": {"pv_losses": config["pv_losses"]}}
     weather.update({"queried_at": now.astimezone(MADRID).isoformat(), "forecast_date": str(target)})
     result = {"schema_version": 1, "date": str(target), "timezone": "Europe/Madrid",
               "settings_sha256": hashlib.sha256(canonical(config)).hexdigest(),
